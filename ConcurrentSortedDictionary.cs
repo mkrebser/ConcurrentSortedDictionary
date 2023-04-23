@@ -80,7 +80,7 @@ public enum SearchResult {
 /// <summary>
 /// Implementation of a concurrent B+Tree. https://en.wikipedia.org/wiki/B+tree#
 /// </summary>
-public class ConcurrentKTree<Key, Value> : IEnumerable<KeyValuePair<Key, Value>> where Key: IComparable<Key> {
+public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<Key, Value>> where Key: IComparable<Key> {
     private volatile ConcurrentKTreeNode<Key, Value> _root;
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void setRoot(object o) {
@@ -104,7 +104,11 @@ public class ConcurrentKTree<Key, Value> : IEnumerable<KeyValuePair<Key, Value>>
     /// </summary>
     public int Depth { get { return _depth; }}
 
-    public ConcurrentKTree(int k) {
+    /// <summary>
+    /// Create a new instance of ConcurrentSortedDictionary
+    /// </summary>
+    /// <param name="k"> Number of children per node. </param>
+    public ConcurrentSortedDictionary(int k = 8) {
         _rootLock = new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion);
         _root = new ConcurrentKTreeNode<Key, Value>(k, isLeaf: true);
         _count = 0;
@@ -642,7 +646,7 @@ public class ConcurrentKTree<Key, Value> : IEnumerable<KeyValuePair<Key, Value>>
         public void unsafe_InsertAtThisNode(
             in K key,
             in V value,
-            in ConcurrentKTree<K, V> tree
+            in ConcurrentSortedDictionary<K, V> tree
         ) {
             if (!this.isLeaf) {
                 throw new Exception("Can only insert at leaf node");
@@ -719,7 +723,7 @@ public class ConcurrentKTree<Key, Value> : IEnumerable<KeyValuePair<Key, Value>>
         /// The current node (this) will keep k/2 lowest children.
         /// The new node will have the same parent as this node.
         /// </summary>
-        private void trySplit(in ConcurrentKTree<K, V> tree) {
+        private void trySplit(in ConcurrentSortedDictionary<K, V> tree) {
             /// <summary>
             /// copy right half of array from -> to and zero-initialize copied indices in 'from'
             /// </summary>
@@ -782,7 +786,7 @@ public class ConcurrentKTree<Key, Value> : IEnumerable<KeyValuePair<Key, Value>>
         /// </summary>
         public void unsafe_DeleteAtThisNode(
             in K key,
-            in ConcurrentKTree<K, V> tree
+            in ConcurrentSortedDictionary<K, V> tree
         ) {
             if (!this.isLeaf) {
                 throw new Exception("Can only delete at leaf node");
@@ -794,7 +798,7 @@ public class ConcurrentKTree<Key, Value> : IEnumerable<KeyValuePair<Key, Value>>
         /// <summary>
         /// This node will merge/adopt from siblings to maintain tree balane
         /// </summary>
-        private void tryMerge(in ConcurrentKTree<K, V> tree) {
+        private void tryMerge(in ConcurrentSortedDictionary<K, V> tree) {
             /// <summary>
             /// Merge 'left' into 'right'. Update parent accordingly.
             /// </summary>
@@ -1128,7 +1132,7 @@ public class ConcurrentKTree<Key, Value> : IEnumerable<KeyValuePair<Key, Value>>
         /// <param name="subTreeDepth"> depth subtrees which get read locked. (eg 1=k values locked, 2=k^2 locked, 3=k^3 locked), etc.. </param>
         /// <param name="itemTimeoutMs"> key of the item to be inserted </param>
         public IEnumerable<KeyValuePair<K, V>> unsafe_AllItems(
-            ConcurrentKTree<Key, Value> tree,
+            ConcurrentSortedDictionary<Key, Value> tree,
             bool hasAcquiredRootLock,
             int subTreeDepth = 2,
             int itemTimeoutMs = -1
