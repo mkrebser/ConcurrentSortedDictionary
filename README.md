@@ -8,7 +8,7 @@ ConcurrentSortedDictionary<Key, Value> implementation in (c#, .NET 7).
   - Writers can write concurrently to the tree *on different nodes in the tree*
   - Writers cannot write concurrently to the *same node in the tree*
   - Readers have concurrent access with other readers- but not writers on a per-node basis.
-  - Nodes in the tree have 'k' children. Increasing 'k' will flatten the tree- and put children into larger contiguous arrays. Decreasing 'k' may decrease contention. By default, there is '8' key-value pairs per leaf node.
+  - Nodes in the tree have 'k' children. Increasing 'k' will flatten the tree- and put children into larger contiguous arrays. Decreasing 'k' may decrease contention. By default, there is '8' key-value pairs per leaf node. Note* there is an O(k) time complexity for modifying and searching each node.
 
 ### Properties
 #### `Count`
