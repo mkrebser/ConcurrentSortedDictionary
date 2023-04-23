@@ -1019,7 +1019,6 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
 
         /// <summary>
         /// Recurse down the tree searching for a value starting at the root.
-        /// **WARNING**. This method assumes the calling thread has acquired the root lock.
         /// </summary>
         /// <param name="key"> key of the item to be inserted </param>
         /// <param name="value"> item to be inserted </param>
