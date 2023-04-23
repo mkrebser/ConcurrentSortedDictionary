@@ -269,6 +269,9 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         in int timeoutMs = -1,
         in bool overwrite = false
     ) {
+        if (!typeof(Key).IsValueType && ReferenceEquals(null, key)) {
+            throw new ArgumentException("Cannot have null key");
+        }
         Value? currentValue; SearchResultInfo<Key, Value> info = default(SearchResultInfo<Key, Value>);
         Latch latch; ConcurrentTreeResult_Extended getResult;
         if (!tryAcquireWriterLatch(in key, in timeoutMs, LatchAccessType.insert,
@@ -328,6 +331,9 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         in Key key,
         in int timeoutMs = -1
     ) {
+        if (!typeof(Key).IsValueType && ReferenceEquals(null, key)) {
+            throw new ArgumentException("Cannot have null key");
+        }
         Value? currentValue; SearchResultInfo<Key, Value> info = default(SearchResultInfo<Key, Value>);
         Latch latch; ConcurrentTreeResult_Extended getResult;
         if (!tryAcquireWriterLatch(in key, in timeoutMs, LatchAccessType.delete,
@@ -387,6 +393,9 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private SearchResult tryGetValue(in Key key, out Value value, in int timeoutMs = -1) {
+        if (!typeof(Key).IsValueType && ReferenceEquals(null, key)) {
+            throw new ArgumentException("Cannot have null key");
+        }
         SearchResultInfo<Key, Value> searchInfo = default(SearchResultInfo<Key, Value>);
         var searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(timeoutMs);
         Latch latch = new Latch(LatchAccessType.read, this._rootLock);
