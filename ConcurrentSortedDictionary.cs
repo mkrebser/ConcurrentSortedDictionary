@@ -75,13 +75,7 @@ public enum SearchResult {
 
 // not using the Nullable<T> notation (eg myType? ) because it adds a small overhead to everything
 // eg, Nullable<int>[] vs int[] -> Nullable<int> will take up double the memory on many x64 systems due to extra boolean flag
-#pragma warning disable CS8600
-#pragma warning disable CS8601
-#pragma warning disable CS8602
-#pragma warning disable CS8603
-#pragma warning disable CS8604
-#pragma warning disable CS8618
-#pragma warning disable CS8625
+#nullable disable
 
 // Locking Scheme: Multiple Readers & Single Writer
 // However, locks are at a granularity of each node- so multiple parts of the tree can be written concurrently
@@ -1357,10 +1351,4 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
     }
 }
 
-#pragma warning restore CS8600
-#pragma warning restore CS8601
-#pragma warning restore CS8602
-#pragma warning restore CS8603
-#pragma warning restore CS8604
-#pragma warning restore CS8625
-#pragma warning restore CS8618
+#nullable restore
