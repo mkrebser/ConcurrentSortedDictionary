@@ -73,14 +73,15 @@ public enum SearchResult {
     timedOut = 2,
 }
 
-// nullable isn't really mandated here. null may or may not be allowed depending on the type of
-// <T> (eg is it valueType? refType? it is allowed to be both)
+// not using the Nullable<T> notation (eg myType? ) because it adds a small overhead to everything
+// eg, Nullable<int>[] vs int[] -> Nullable<int> will take up double the memory on many x64 systems due to extra boolean flag
 #pragma warning disable CS8600
 #pragma warning disable CS8601
 #pragma warning disable CS8602
 #pragma warning disable CS8603
 #pragma warning disable CS8604
-#pragma warning disable CA2200 // catch and rethrow an exception for purpose of releasing mutex
+#pragma warning disable CS8618
+#pragma warning disable CS8625
 
 // Locking Scheme: Multiple Readers & Single Writer
 // However, locks are at a granularity of each node- so multiple parts of the tree can be written concurrently
@@ -163,7 +164,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         in int timeoutMs,
         in LatchAccessType accessType,
         out Latch latch,
-        out Value? currentValue,
+        out Value currentValue,
         ref SearchResultInfo<Key, Value> info,
         out ConcurrentTreeResult_Extended getResult
     ) {
@@ -297,7 +298,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         if (!typeof(Key).IsValueType && ReferenceEquals(null, key)) {
             throw new ArgumentException("Cannot have null key");
         }
-        Value? currentValue; SearchResultInfo<Key, Value> info = default(SearchResultInfo<Key, Value>);
+        Value currentValue; SearchResultInfo<Key, Value> info = default(SearchResultInfo<Key, Value>);
         Latch latch; ConcurrentTreeResult_Extended getResult;
         if (!tryAcquireWriterLatch(in key, in timeoutMs, LatchAccessType.insert,
         out latch, out currentValue, ref info, out getResult)) {
@@ -359,7 +360,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         if (!typeof(Key).IsValueType && ReferenceEquals(null, key)) {
             throw new ArgumentException("Cannot have null key");
         }
-        Value? currentValue; SearchResultInfo<Key, Value> info = default(SearchResultInfo<Key, Value>);
+        Value currentValue; SearchResultInfo<Key, Value> info = default(SearchResultInfo<Key, Value>);
         Latch latch; ConcurrentTreeResult_Extended getResult;
         if (!tryAcquireWriterLatch(in key, in timeoutMs, LatchAccessType.delete,
         out latch, out currentValue, ref info, out getResult)) {
@@ -553,7 +554,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         /// </summary>
         public readonly bool retainReaderLock;
 
-        private ReaderWriterLockSlim? _rootLock;
+        private ReaderWriterLockSlim _rootLock;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public bool tryEnterRootLock(int timeoutMs = -1) {
@@ -597,7 +598,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
     /// Tree Node with N children. Can be a leaf or an internal node.
     /// </summary>
     private class ConcurrentKTreeNode<K, V> where K: IComparable<K> {
-        public ConcurrentKTreeNode(int k, ConcurrentKTreeNode<K, V>? parent = null, bool isLeaf = false) {
+        public ConcurrentKTreeNode(int k, ConcurrentKTreeNode<K, V> parent = null, bool isLeaf = false) {
             if (isLeaf) {
                 this._values = new NodeData<K, V>[k+1];
                 this._children = null;
@@ -609,9 +610,9 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
             this._count = 0;
             this._parent = parent;
         }
-        private NodeData<K, V>[]? _values;
-        private NodeData<K, ConcurrentKTreeNode<K, V>>[]? _children;
-        private volatile ConcurrentKTreeNode<K, V>? _parent;
+        private NodeData<K, V>[] _values;
+        private NodeData<K, ConcurrentKTreeNode<K, V>>[] _children;
+        private volatile ConcurrentKTreeNode<K, V> _parent;
         private volatile int _count;
         private volatile ReaderWriterLockSlim _rwLock; // Each node has its own lock
 
@@ -1062,63 +1063,57 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
                     ConcurrentTreeResult_Extended.notSafeToUpdateLeaf;
             }
 
-            try {
-                for (int depth = 0; depth < options.maxDepth; depth++) {
-                    if (info.node.isLeaf) {
-                        int compareResult;
-                        info.index = info.node.searchRangeIndex(key, info.node._values, out compareResult);
-                        info.depth = depth;
-                        var searchResult = ConcurrentTreeResult_Extended.success;
-                        if (compareResult == 0) {
-                            value = info.node._values[info.index].value;
-                        } else {
-                            value = default(V);
-                            info.index = -1;
-                            searchResult = ConcurrentTreeResult_Extended.notFound;
-                        }
-                        // Exit latch if reading and not retaining
-                        if (latch.accessType == LatchAccessType.read && !latch.retainReaderLock) {
-                            info.node.ExitLatchChain(ref latch);
-                        }
-                        return searchResult;
+            for (int depth = 0; depth < options.maxDepth; depth++) {
+                if (info.node.isLeaf) {
+                    int compareResult;
+                    info.index = info.node.searchRangeIndex(key, info.node._values, out compareResult);
+                    info.depth = depth;
+                    var searchResult = ConcurrentTreeResult_Extended.success;
+                    if (compareResult == 0) {
+                        value = info.node._values[info.index].value;
                     } else {
-                        int nextIndex = info.node.searchRangeIndex(in key, in info.node._children);
-                        // get next sibling subtree
-                        if (nextIndex + 1 < info.node.Count) {
-                            info.hasNextSubTree = true;
-                            info.nextSubTreeKey = info.node._children[nextIndex + 1].key;
-                        }
-                        // Move to next node
-                        info.node = info.node._children[nextIndex].value;
-                        info.depth = depth + 1;
-                        // Try Enter latch on next node (which will also atomically exit latch on parent)
-                        if (info.node.TryEnterLatch(ref latch, in remainingMs) != LatchAccessResult.acquired) {
-                            value = default(V);
-                            info.index = -1;
-                            return result == LatchAccessResult.timedOut ?
-                                ConcurrentTreeResult_Extended.timedOut :
-                                ConcurrentTreeResult_Extended.notSafeToUpdateLeaf;
-                        }
+                        value = default(V);
+                        info.index = -1;
+                        searchResult = ConcurrentTreeResult_Extended.notFound;
                     }
-
-                    remainingMs = getRemainingMs(in options.startTime, in options.timeoutMs);
+                    // Exit latch if reading and not retaining
+                    if (latch.accessType == LatchAccessType.read && !latch.retainReaderLock) {
+                        info.node.ExitLatchChain(ref latch);
+                    }
+                    return searchResult;
+                } else {
+                    int nextIndex = info.node.searchRangeIndex(in key, in info.node._children);
+                    // get next sibling subtree
+                    if (nextIndex + 1 < info.node.Count) {
+                        info.hasNextSubTree = true;
+                        info.nextSubTreeKey = info.node._children[nextIndex + 1].key;
+                    }
+                    // Move to next node
+                    info.node = info.node._children[nextIndex].value;
+                    info.depth = depth + 1;
+                    // Try Enter latch on next node (which will also atomically exit latch on parent)
+                    if (info.node.TryEnterLatch(ref latch, in remainingMs) != LatchAccessResult.acquired) {
+                        value = default(V);
+                        info.index = -1;
+                        return result == LatchAccessResult.timedOut ?
+                            ConcurrentTreeResult_Extended.timedOut :
+                            ConcurrentTreeResult_Extended.notSafeToUpdateLeaf;
+                    }
                 }
 
-                // Sanity check
-                if (info.depth >= int.MaxValue - 1) {
-                    throw new Exception("Bad Tree State, reached integer max depth limit");
-                }
-                // maxDepth was reached before finding a result!
-                if (latch.accessType == LatchAccessType.read && !latch.retainReaderLock) {
-                    info.node.ExitLatchChain(ref latch);
-                }
-                value = default(V);
-                return ConcurrentTreeResult_Extended.notFound;
-            } catch (Exception e) {
-                // catching to unlock- then rethrow
-                info.node.ExitLatchChain(ref latch);
-                throw e;
+                remainingMs = getRemainingMs(in options.startTime, in options.timeoutMs);
             }
+
+            // Sanity check
+            if (info.depth >= int.MaxValue - 1) {
+                throw new Exception("Bad Tree State, reached integer max depth limit");
+            }
+            // maxDepth was reached before finding a result!
+            if (latch.accessType == LatchAccessType.read && !latch.retainReaderLock) {
+                info.node.ExitLatchChain(ref latch);
+            }
+            value = default(V);
+            return ConcurrentTreeResult_Extended.notFound;
         }
 
         /// <summary>
@@ -1187,7 +1182,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
             bool doLargerThanCheck = false;
             int maxDepth = Math.Max(0, tree.Depth - subTreeDepth);
             var searchOptions = new SearchOptions(itemTimeoutMs, maxDepth, true);
-            Latch latch = new Latch(LatchAccessType.read, tree._rootLock);
+            Latch latch = new Latch(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
 
             // Get Min subtree (eg starting point)
             var searchResult = unsafe_TryGetValue(subtree.nextSubTreeKey, out _, ref subtree,
@@ -1229,11 +1224,12 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
 
                 // Get next tree
                 searchOptions = new SearchOptions(itemTimeoutMs, maxDepth, false);
-                latch = new Latch(LatchAccessType.read, tree._rootLock);
+                latch = new Latch(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
                 searchResult = unsafe_TryGetValue(
                     subtree.nextSubTreeKey, out _, ref subtree, ref latch, in tree, searchOptions);
                 // If failed due to timout.. or there is no next key
                 if (!subtree.hasNextSubTree) {
+                    subtree.node.ExitLatchChain(ref latch);
                     yield break;
                 } else if (searchResult == ConcurrentTreeResult_Extended.timedOut) {
                     throw new TimeoutException();
@@ -1366,4 +1362,5 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
 #pragma warning restore CS8602
 #pragma warning restore CS8603
 #pragma warning restore CS8604
-#pragma warning disable CA2200
+#pragma warning restore CS8625
+#pragma warning restore CS8618
