@@ -2,13 +2,13 @@
 ConcurrentSortedDictionary<Key, Value> implementation in (c#, .NET 7).
 
 - The interface is based on [.NET ConcurrentDictionary:](https://learn.microsoft.com/en-us/dotnet/api/system.collections.concurrent.concurrentdictionary-2?view=net-7.0)
-- The ConcurrentSortedDictionary class is entirely contained in ConcurrentSortedDictionary.cs.
-- The ConcurrentSortedDictionary is implemented using a B+tree. [A B+Tree is a k-ary search tree](https://en.wikipedia.org/wiki/B%2B_tree#). 
-- Mutual Exclusion is guarenteed via latching using Reader-Writer locks. Generally, this means that mutual exclusion is enforced per node in the tree. 
+- The ConcurrentSortedDictionary class is entirely implemented in a single file: [ConcurrentSortedDictionary.cs.](https://github.com/mkrebser/ConcurrentSortedDictionary/blob/master/ConcurrentSortedDictionary.cs)
+- The ConcurrentSortedDictionary is [implemented using a B+tree.](https://en.wikipedia.org/wiki/B%2B_tree#)
+- Mutual Exclusion is guarenteed via latching using Reader-Writer locks on each tree node.
   - Writers can write concurrently to the tree *on different nodes in the tree*
   - Writers cannot write concurrently to the *same node in the tree*
-  - Readers have concurrent access with other readers- but not writers on a per-node basis.
-  - Nodes in the tree have 'k' children. Increasing 'k' will flatten the tree- and put children into larger contiguous arrays. Decreasing 'k' may decrease contention. By default, there is '8' key-value pairs per leaf node. Note* there is an O(k) time complexity for modifying and searching each node.
+  - Readers have concurrent access with other readers- but not writers.
+  - Nodes in the tree have 'k' children.
 
 ### Properties
 #### `Count`
