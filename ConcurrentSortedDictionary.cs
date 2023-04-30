@@ -22,6 +22,11 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
+// Use ConcurrentSortedDictionary_DEBUG for all debugging assertions incase someone wants to change it...
+#if DEBUG
+#define ConcurrentSortedDictionary_DEBUG
+#endif
+
 
 using System.Runtime.CompilerServices;
 
@@ -100,7 +105,7 @@ public enum SearchResult {
 /// <summary>
 /// Implementation of a concurrent B+Tree. https://en.wikipedia.org/wiki/B+tree#
 /// </summary>
-public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<Key, Value>> where Key: IComparable<Key> {
+public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<Key, Value>> where Key: IComparable<Key> {
     private volatile ConcurrentKTreeNode<Key, Value> _root;
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void setRoot(object o) {
@@ -122,18 +127,25 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
     /// <summary>
     /// Approximate depth of the search tree. Value may be stale in concurrent access.
     /// </summary>
-    public int Depth { get { return _depth; }}
+    public int Depth { get { return _depth + 1; } } // A tree with only root node has _depth = 0
+
+    /// <summary>
+    /// Width of each node in the tree.
+    /// </summary>
+    public readonly int k;
 
     /// <summary>
     /// Create a new instance of ConcurrentSortedDictionary
     /// </summary>
     /// <param name="k"> Number of children per node. </param>
     public ConcurrentSortedDictionary(int k = 8) {
-        if (k < 2)
+        if (k < 3) // Don't allow '2', it creates potentially many leafs with only 1 item due to b+ tree requirements
             throw new ArgumentException("Invalid k specified");
         _rootLock = new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion);
         _root = new ConcurrentKTreeNode<Key, Value>(k, isLeaf: true);
         _count = 0;
+        _depth = 0;
+        this.k = k;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -141,63 +153,23 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         if (timeoutMs < 0)
             throw new ArgumentException("Timeout cannot be negative!");
     }
-
-    /// <summary>
-    /// Returns true if writer latch is successfully acquired. False if not.
-    /// </summary>
-    /// <param name="key"> key of the item for latch search </param>
-    /// <param name="timeoutMs"> optional timeout in milliseconds </param>
-    /// <param name="startTime"> time in milliseconds since 1970 when call was started. </param>
-    /// <param name="accessType"> type of latch to acquire </param>
-    /// <param name="latch"> output latch that is acquired </param>
-    /// <param name="currentValue"> deepest node at which the seatch ended </param>
-    /// <param name="info"> search result metadata </param>
-    /// <param name="getResult"> search result. guarenteed 'notFound' or 'success if latch was successfully acquired. </param>
-    private bool tryAcquireWriterLatch(
-        in Key key,
-        in int timeoutMs,
-        in LatchAccessType accessType,
-        out Latch latch,
-        out Value currentValue,
-        ref SearchResultInfo<Key, Value> info,
-        out ConcurrentTreeResult_Extended getResult
-    ) {
-        // Create a latch that will acquire read locks on all internal nodes
-        // and then only try to writeLock the leaf. 
-        // (We optimistically assume the value can be trivially modified)
-        latch = new Latch(accessType, this._rootLock, assumeLeafIsSafe: true);
-        long startTime = DateTimeOffset.Now.ToUnixTimeMilliseconds();
-        int remainingMs = getRemainingMs(in startTime, in timeoutMs);
-        var searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(remainingMs, startTime: startTime);
-        // Perform a query to recurse to the deepest node, latching downwards optimistically
-        getResult = ConcurrentKTreeNode<Key, Value>.unsafe_TryGetValue(in key, out currentValue,
-            ref info, ref latch, this, searchOptions);
-
-        // If the leaf wasn't safe to update.. Try again but with write locks all the way down. 
-        if (getResult == ConcurrentTreeResult_Extended.notSafeToUpdateLeaf) {
-            // TryGetValue will completely exit the latch if it was determined notSafe
-            latch = new Latch(accessType, this._rootLock, assumeLeafIsSafe: false);
-            remainingMs = getRemainingMs(in startTime, in timeoutMs);
-            searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(remainingMs, startTime: searchOptions.startTime);
-            getResult = ConcurrentKTreeNode<Key, Value>.unsafe_TryGetValue(in key, out currentValue,
-                ref info, ref latch, this, searchOptions);
+    InsertResult ToInsertResult(in ConcurrentTreeResult_Extended result) {
+        if (result == ConcurrentTreeResult_Extended.success) {
+            return InsertResult.success;
+        } else if (result == ConcurrentTreeResult_Extended.alreadyExists) {
+            return InsertResult.alreadyExists;
+        } else {
+            return InsertResult.timedOut;
         }
-
-        // Check if timed out...
-        if (getResult == ConcurrentTreeResult_Extended.timedOut) {
-            currentValue = default(Value);
-            info = default(SearchResultInfo<Key, Value>);
-            return false;
+    }
+    RemoveResult ToRemoveResult(in ConcurrentTreeResult_Extended result) {
+        if (result == ConcurrentTreeResult_Extended.success) {
+            return RemoveResult.success;
+        } else if (result == ConcurrentTreeResult_Extended.notFound) {
+            return RemoveResult.notFound;
+        } else {
+            return RemoveResult.timedOut;
         }
-
-        // sanity check
-        if (getResult != ConcurrentTreeResult_Extended.success &&
-        getResult != ConcurrentTreeResult_Extended.notFound) {
-            throw new Exception("Bad Tree State: " + getResult.ToString());
-        }
-
-        // Write latch acquired!
-        return true;
     }
 
     /// <summary>
@@ -210,7 +182,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
     ) {
         assertTimeoutArg(timeoutMs);
         Value retrievedValue;
-        return insert(in key, in value, out retrievedValue, in timeoutMs, true);
+        return ToInsertResult(writeToTree(in key, in value, in timeoutMs, LatchAccessType.insert, out retrievedValue, true));
     }
 
     /// <summary>
@@ -221,7 +193,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         in Value value
     ) {
         Value retrievedValue;
-        insert(in key, in value, out retrievedValue, -1, true);
+        writeToTree(in key, in value, -1, LatchAccessType.insert, out retrievedValue, true);
     }
 
     /// <summary>
@@ -234,7 +206,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
     ) {
         assertTimeoutArg(timeoutMs);
         Value retrievedValue;
-        return insert(in key, in value, out retrievedValue, in timeoutMs, false);
+        return ToInsertResult(writeToTree(in key, in value, in timeoutMs, LatchAccessType.insert, out retrievedValue, false));
     }
 
     /// <summary>
@@ -245,7 +217,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         in Value value
     ) {
         Value retrievedValue;
-        return insert(in key, in value, out retrievedValue, -1, false) == InsertResult.success;
+        return ToInsertResult(writeToTree(in key, in value, -1, LatchAccessType.insert, out retrievedValue, false)) == InsertResult.success;
     }
 
     /// <summary>
@@ -258,7 +230,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         out Value retrievedValue
     ) {
         assertTimeoutArg(timeoutMs);
-        return insert(in key, in value, out retrievedValue, in timeoutMs, false);
+        return ToInsertResult(writeToTree(in key, in value, in timeoutMs, LatchAccessType.insert, out retrievedValue, false));
     }
 
     /// <summary>
@@ -269,58 +241,130 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         in Value value
     ) {
         Value retrievedValue;
-        insert(in key, in value, out retrievedValue, -1, false);
+        writeToTree(in key, in value, -1, LatchAccessType.insert, out retrievedValue, false);
         return retrievedValue;
     }
 
+    void tryUpdateDepth(int newSearchDepth) {
+        if (newSearchDepth >= 30) {
+            throw new ArgumentException("Reached 31 tree limit depth. Only a max of "
+                + (int)Math.Pow(this.k, 31) + " items is supported. Increasing 'k' will increase limit.");
+        }
+        this._depth = newSearchDepth;
+    }
+
     /// <summary>
-    /// Insert a value into the tree starting at this node.
+    /// Perform a insert or delete on the tree depending on the LatchAccessType.
     /// </summary>
-    /// <param name="key"> key of the item to be inserted </param>
-    /// <param name="value"> item to be inserted </param>
-    /// <param name="timeoutMs"> optional timeout in milliseconds </param>
-    /// <param name="overwrite"> overwrite existing value. default is false. </param>
-    /// <returns> success if inserted. alreadyExists if key already exists & overwrite=false. timedOut if timed out. </returns>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private InsertResult insert(
+    private ConcurrentTreeResult_Extended writeToTree(
         in Key key,
         in Value value,
+        in int timeoutMs,
+        in LatchAccessType accessType,
         out Value retrievedValue,
-        in int timeoutMs = -1,
         in bool overwrite = false
     ) {
         if (!typeof(Key).IsValueType && ReferenceEquals(null, key)) {
             throw new ArgumentException("Cannot have null key");
         }
-        Value currentValue; SearchResultInfo<Key, Value> info = default(SearchResultInfo<Key, Value>);
-        Latch latch; ConcurrentTreeResult_Extended getResult;
-        if (!tryAcquireWriterLatch(in key, in timeoutMs, LatchAccessType.insert,
-        out latch, out currentValue, ref info, out getResult)) {
-            retrievedValue = default(Value);
-            return InsertResult.timedOut;
-        }
-        this._depth = info.depth; // Note* Int32 read/write is atomic
 
-        // Perform write.
-        try {
-            // If the vaue already exists...
-            if (getResult == ConcurrentTreeResult_Extended.success) {
-                if (overwrite) {
-                    info.node.SetValue(info.index, in key, in value);
-                    retrievedValue = value;
-                    return InsertResult.success;
-                }
-                retrievedValue = info.node.GetValue(info.index).value;
-                return InsertResult.alreadyExists;
-            }
-            info.node.unsafe_InsertAtThisNode(in key, in value, this);
-            Interlocked.Increment(ref this._count); // increase count
-            retrievedValue = value;
-            return InsertResult.success;
-        } finally {
-            // Exit the latch after writing
-            info.node.ExitLatchChain(ref latch);
+        SearchResultInfo<Key, Value> info = default(SearchResultInfo<Key, Value>);
+        Value currentValue;
+        // Optmistic latching
+        var rwLatch = new Latch<Key, Value>(accessType, this._rootLock, assumeLeafIsSafe: true);
+        var rwLockBuffer = new LockBuffer2<Key, Value>();
+        long startTime = DateTimeOffset.Now.ToUnixTimeMilliseconds();
+        int remainingMs = getRemainingMs(in startTime, in timeoutMs);
+        var searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(remainingMs, startTime: startTime);
+        // Perform a query to recurse to the deepest node, latching downwards optimistically
+        var getResult = ConcurrentKTreeNode<Key, Value>.unsafe_TryGetValue(in key, out currentValue,
+            ref info, ref rwLatch, ref rwLockBuffer, this, searchOptions);
+        
+        // Timeout!
+        if (getResult == ConcurrentTreeResult_Extended.timedOut) {
+            retrievedValue = default(Value);
+            return ConcurrentTreeResult_Extended.timedOut;
         }
+        
+        // If we were able to optimistally acquire latch...
+        // The write to tree
+        if (getResult != ConcurrentTreeResult_Extended.notSafeToUpdateLeaf) {
+            try {
+                if (accessType == LatchAccessType.insert) {
+                    tryUpdateDepth(info.depth);
+                    return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue);
+                } else {
+                    retrievedValue = default(Value);
+                    return writeDeletion(in key, in info, in getResult);
+                }
+            } finally {
+                rwLatch.ExitLatchChain(ref rwLockBuffer);
+            }
+        }
+
+        // Otherwise, try to acquire write access using a full write latch chain
+        var writeLatch = new Latch<Key, Value>(accessType, this._rootLock, assumeLeafIsSafe: false);
+        var writeLockBuffer = new LockBuffer32<Key, Value>();
+        remainingMs = getRemainingMs(in startTime, in timeoutMs);
+        searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(remainingMs, startTime: startTime);
+        getResult = ConcurrentKTreeNode<Key, Value>.unsafe_TryGetValue(in key, out currentValue,
+            ref info, ref writeLatch, ref writeLockBuffer, this, searchOptions);
+
+        // Check if timed out...
+        if (getResult == ConcurrentTreeResult_Extended.timedOut) {
+                retrievedValue = default(Value);
+             return ConcurrentTreeResult_Extended.timedOut;
+        }
+
+        try {
+            if (accessType == LatchAccessType.insert) {
+                tryUpdateDepth(info.depth);
+                return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue);
+            } else {
+                retrievedValue = default(Value);
+                return writeDeletion(in key, in info, in getResult);
+            }
+        } finally {
+            writeLatch.ExitLatchChain(ref writeLockBuffer);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ConcurrentTreeResult_Extended writeInsertion(
+        in Key key,
+        in Value value,
+        in SearchResultInfo<Key, Value> info,
+        in ConcurrentTreeResult_Extended getResult,
+        in bool overwrite,
+        out Value retrievedValue
+    ) {
+        // If the vaue already exists...
+        if (getResult == ConcurrentTreeResult_Extended.success) {
+            if (overwrite) {
+                info.node.SetValue(info.index, in key, in value);
+                retrievedValue = value;
+                return ConcurrentTreeResult_Extended.success;
+            }
+            retrievedValue = info.node.GetValue(info.index).value;
+            return ConcurrentTreeResult_Extended.alreadyExists;
+        }
+        info.node.unsafe_InsertAtThisNode(in key, in value, this);
+        Interlocked.Increment(ref this._count); // increase count
+        retrievedValue = value;
+        return ConcurrentTreeResult_Extended.success;
+    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private ConcurrentTreeResult_Extended writeDeletion(
+        in Key key,
+        in SearchResultInfo<Key, Value> info,
+        in ConcurrentTreeResult_Extended getResult
+    ) {
+        if (getResult == ConcurrentTreeResult_Extended.notFound) {
+            return ConcurrentTreeResult_Extended.notFound;
+        }
+        info.node.unsafe_DeleteAtThisNode(in key, this);
+        Interlocked.Decrement(ref this._count); // decrement count
+        return ConcurrentTreeResult_Extended.success;
     }
 
     /// <summary>
@@ -328,53 +372,16 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
     /// </summary>
     public RemoveResult TryRemove(in Key key, int timeoutMs) {
         assertTimeoutArg(timeoutMs);
-        return remove(in key, in timeoutMs);
+        Value v = default(Value);
+        return ToRemoveResult(writeToTree(in key, in v, in timeoutMs, LatchAccessType.delete, out v));
     }
 
     /// <summary>
     /// Remove a key-value pair from the tree. Waits forever until mutex(s) are acquired.
     /// </summary>
     public bool TryRemove(in Key key) {
-        return remove(in key, -1) == RemoveResult.success;
-    }
-
-    /// <summary>
-    /// Remove a key-value pair from the tree.
-    /// </summary>
-    /// <param name="key"> key of the item to be inserted </param>
-    /// <param name="timeoutMs"> optional timeout in milliseconds </param>
-    /// <param name="startTime"> time in milliseconds since 1970 when call was started. </param>
-    /// <param name="rootLock"> lock used to protect access to the tree root pointer. (Edge case for making new root node) </param>
-    /// <returns> success if removed. notFound if not found. timedOut if timed out. </returns>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private RemoveResult remove(
-        in Key key,
-        in int timeoutMs = -1
-    ) {
-        if (!typeof(Key).IsValueType && ReferenceEquals(null, key)) {
-            throw new ArgumentException("Cannot have null key");
-        }
-        Value currentValue; SearchResultInfo<Key, Value> info = default(SearchResultInfo<Key, Value>);
-        Latch latch; ConcurrentTreeResult_Extended getResult;
-        if (!tryAcquireWriterLatch(in key, in timeoutMs, LatchAccessType.delete,
-        out latch, out currentValue, ref info, out getResult)) {
-            return RemoveResult.timedOut;
-        }
-        this._depth = info.depth; // Note* Int32 read/write is atomic
-
-        // Perform write.
-        try {
-            // If the vaue already exists...
-            if (getResult == ConcurrentTreeResult_Extended.notFound) {
-                return RemoveResult.notFound;
-            }
-            info.node.unsafe_DeleteAtThisNode(in key, this);
-            Interlocked.Decrement(ref this._count); // decrement count
-            return RemoveResult.success;
-        } finally {
-            // Exit the latch after writing
-            info.node.ExitLatchChain(ref latch);
-        }
+        Value v = default(Value);
+        return ToRemoveResult(writeToTree(in key, in v, -1, LatchAccessType.delete, out v)) == RemoveResult.success;
     }
 
     /// <summary>
@@ -418,9 +425,10 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         }
         SearchResultInfo<Key, Value> searchInfo = default(SearchResultInfo<Key, Value>);
         var searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(timeoutMs);
-        Latch latch = new Latch(LatchAccessType.read, this._rootLock);
+        var latch = new Latch<Key, Value> (LatchAccessType.read, this._rootLock);
+        var readLockBuffer = new LockBuffer2<Key, Value>();
         var result = ConcurrentKTreeNode<Key, Value>.unsafe_TryGetValue(in key, out value,
-            ref searchInfo, ref latch, this, searchOptions);
+            ref searchInfo, ref latch, ref readLockBuffer, this, searchOptions);
         if (result == ConcurrentTreeResult_Extended.timedOut) {
             return SearchResult.timedOut;
         }
@@ -468,6 +476,32 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
 
     IEnumerator IEnumerable.GetEnumerator() {
         return this.GetEnumerator();
+    }
+
+    public void Clear() {
+        clear();
+    }
+    public bool Clear(int timeoutMs) {
+        assertTimeoutArg(timeoutMs);
+        return clear();
+    }
+
+    private bool clear(int timeoutMs = -1) {
+        // Try to enter the root lock
+        var latch = new Latch<Key, Value> (LatchAccessType.delete, this._rootLock, assumeLeafIsSafe: false);
+        if (!latch.TryEnterRootLock(timeoutMs)) {
+            return false;
+        }
+        try {
+            // Make a new root...
+            var newRoot = new ConcurrentKTreeNode<Key, Value>(_root.k, parent: null, isLeaf: true);
+            this.setRoot(newRoot);
+            this._count = 0;
+            this._depth = 0;
+            return true;
+        } finally {
+            latch.ExitRootLock();
+        }
     }
 
     /// <summary>
@@ -528,11 +562,104 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         notSafeToUpdateLeaf = 2
     }
 
-    private struct Latch {
-        /// <summary>
-        /// Length of the latch chain
-        /// </summary>
-        public int latchLength;
+    private interface ILockBuffer<K, V> where K: IComparable<K> {
+        public ConcurrentKTreeNode<K, V> peek();
+        public void push(in ConcurrentKTreeNode<K, V> node);
+        public ConcurrentKTreeNode<K, V> pop();
+    }
+
+    private struct LockBuffer2<K, V> : ILockBuffer<K, V> where K: IComparable<K> {
+        public ConcurrentKTreeNode<K, V> peek() {
+            if (!ReferenceEquals(null, r1)) return r1;
+            else return r0;
+        }
+        public void push(in ConcurrentKTreeNode<K, V> node) {
+            if (ReferenceEquals(null, r0)) r0 = node;
+            else if (ReferenceEquals(null, r1)) r1 = node;
+            else throw new ArgumentException("Lock stack is full");
+        }
+        public ConcurrentKTreeNode<K, V> pop() {
+            //Note* pop returns null on empty, this is intentional
+            // See Latch.ExitLatchChain- it will just iterate until pop() returns null
+            if (!ReferenceEquals(null, r1)) {
+                var result = r1;
+                r1 = null;
+                return result;
+            } else {
+                var result = r0;
+                r0 = null;
+                return result;
+            }
+        }
+
+        private ConcurrentKTreeNode<K, V> r0; private ConcurrentKTreeNode<K, V> r1;
+    }
+
+    // Doing this nonsense because c# doesn't allow stacalloc of reference type arrays.
+    // -And don't want to force users to use unsafe if they arent compiling with it.
+    // Another alternative is to create a pool<buffers> or linked list nodes-
+    // but this would potentially create unexpected memory usage by this data structure.
+    // This struct should be 256 bytes and is used whenever a write forces changing the tree structure.
+    private struct LockBuffer32<K, V> : ILockBuffer<K, V> where K: IComparable<K> {
+        public ConcurrentKTreeNode<K, V> peek() {
+            if (this.Count <= 0)
+                return null;
+            return get(this.Count - 1);
+        }
+        public int Count { get; private set; }
+        public void push(in ConcurrentKTreeNode<K, V> node) {
+            if (this.Count >= 32)
+                throw new ArgumentException("Cannot push, reach lock buffer limit");
+            set(this.Count, in node);
+            this.Count++;
+        }
+        public ConcurrentKTreeNode<K, V> pop() {
+            //Note* pop returns null on empty, this is intentional
+            if (this.Count <= 0)
+                return null;
+            var topNode = get(this.Count - 1);
+            set(this.Count - 1, null);
+            this.Count--;
+            return topNode;
+        }
+
+        private ConcurrentKTreeNode<K, V> r0; private ConcurrentKTreeNode<K, V> r1; private ConcurrentKTreeNode<K, V> r2; private ConcurrentKTreeNode<K, V> r3;
+        private ConcurrentKTreeNode<K, V> r4; private ConcurrentKTreeNode<K, V> r5; private ConcurrentKTreeNode<K, V> r6; private ConcurrentKTreeNode<K, V> r7;
+        private ConcurrentKTreeNode<K, V> r8; private ConcurrentKTreeNode<K, V> r9; private ConcurrentKTreeNode<K, V> r10; private ConcurrentKTreeNode<K, V> r11;
+        private ConcurrentKTreeNode<K, V> r12; private ConcurrentKTreeNode<K, V> r13; private ConcurrentKTreeNode<K, V> r14; private ConcurrentKTreeNode<K, V> r15;
+        private ConcurrentKTreeNode<K, V> r16; private ConcurrentKTreeNode<K, V> r17; private ConcurrentKTreeNode<K, V> r18; private ConcurrentKTreeNode<K, V> r19;
+        private ConcurrentKTreeNode<K, V> r20; private ConcurrentKTreeNode<K, V> r21; private ConcurrentKTreeNode<K, V> r22; private ConcurrentKTreeNode<K, V> r23;
+        private ConcurrentKTreeNode<K, V> r24; private ConcurrentKTreeNode<K, V> r25; private ConcurrentKTreeNode<K, V> r26; private ConcurrentKTreeNode<K, V> r27;
+        private ConcurrentKTreeNode<K, V> r28; private ConcurrentKTreeNode<K, V> r29; private ConcurrentKTreeNode<K, V> r30; private ConcurrentKTreeNode<K, V> r31;
+
+        private void set(in int i, in ConcurrentKTreeNode<K, V> value) {
+            switch (i) {
+                case 0: this.r0 = value; return; case 1: this.r1 = value; return; case 2: this.r2 = value; return; case 3: this.r3 = value; return;
+                case 4: this.r4 = value; return; case 5: this.r5 = value; return; case 6: this.r6 = value; return; case 7: this.r7 = value; return;
+                case 8: this.r8 = value; return; case 9: this.r9 = value; return; case 10: this.r10 = value; return; case 11: this.r11 = value; return;
+                case 12: this.r12 = value; return; case 13: this.r13 = value; return; case 14: this.r14 = value; return; case 15: this.r15 = value; return;
+                case 16: this.r16 = value; return; case 17: this.r17 = value; return; case 18: this.r18 = value; return; case 19: this.r19 = value; return;
+                case 20: this.r20 = value; return; case 21: this.r21 = value; return; case 22: this.r22 = value; return; case 23: this.r23 = value; return;
+                case 24: this.r24 = value; return; case 25: this.r25 = value; return; case 26: this.r26 = value; return; case 27: this.r27 = value; return;
+                case 28: this.r28 = value; return; case 29: this.r29 = value; return; case 30: this.r30 = value; return; case 31: this.r31 = value; return;
+            }
+        }
+        private ConcurrentKTreeNode<K, V> get(in int i) {
+            switch (i) {
+                case 0: return this.r0; case 1: return this.r1; case 2: return this.r2; case 3: return this.r3;
+                case 4: return this.r4; case 5: return this.r5; case 6: return this.r6; case 7: return this.r7;
+                case 8: return this.r8; case 9: return this.r9; case 10: return this.r10; case 11: return this.r11;
+                case 12: return this.r12; case 13: return this.r13; case 14: return this.r14; case 15: return this.r15;
+                case 16: return this.r16; case 17: return this.r17; case 18: return this.r18; case 19: return this.r19;
+                case 20: return this.r20; case 21: return this.r21; case 22: return this.r22; case 23: return this.r23;
+                case 24: return this.r24; case 25: return this.r25; case 26: return this.r26; case 27: return this.r27;
+                case 28: return this.r28; case 29: return this.r29; case 30: return this.r30; case 31: return this.r31;
+                default: throw new IndexOutOfRangeException();
+            }
+        }
+    }
+
+    private struct Latch<K, V> where K : IComparable<K> {
         /// <summary>
         /// if 'true', write operations will acquire read locks all the way to the leaf- and then acquire
         /// a write lock only on the leaf. if 'false' then write locks will be used to traverse down the
@@ -551,7 +678,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         private ReaderWriterLockSlim _rootLock;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public bool tryEnterRootLock(int timeoutMs = -1) {
+        public bool TryEnterRootLock(int timeoutMs = -1) {
             if (this.accessType == LatchAccessType.read || this.assumeLeafIsSafe) {
                 return this._rootLock.TryEnterReadLock(timeoutMs);
             } else {
@@ -563,15 +690,78 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         /// exits the rootLock or does nothing if it was already exited.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void tryExitRootLock(bool isLeaf) {
+        public void ExitRootLock() {
             if (!ReferenceEquals(null, this._rootLock)) {
-                if (this.accessType == LatchAccessType.read ||
-                    (this.assumeLeafIsSafe && !isLeaf)) {
-                        this._rootLock.ExitReadLock();
+                if (this.accessType == LatchAccessType.read || this.assumeLeafIsSafe) {
+                    this._rootLock.ExitReadLock();
                 } else {
                     this._rootLock.ExitWriteLock();
                 }
                 this._rootLock = null;
+            }
+        }
+
+        /// <summary>
+        /// Exit the latch at this level and every parent including the rootLock
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void ExitLatchChain<LockBuffer>(ref LockBuffer lockBuffer) where LockBuffer : ILockBuffer<K, V> {
+            ConcurrentKTreeNode<K, V> node = lockBuffer.pop();
+            while (node != null) {
+                if (this.accessType == LatchAccessType.read ||
+                    (this.assumeLeafIsSafe && !node.isLeaf)
+                ) {
+                    node._rwLock.ExitReadLock();
+                } else {
+                    node._rwLock.ExitWriteLock();
+                }
+                node = lockBuffer.pop();
+            }
+            ExitRootLock();
+        }
+
+        public LatchAccessResult TryEnterLatch<LockBuffer>(
+            ref LockBuffer lockBuffer,
+            in ConcurrentKTreeNode<K, V> node,
+            in int timeoutMs
+        ) where LockBuffer : ILockBuffer<K, V> {
+            if (this.accessType == LatchAccessType.read ||
+                (this.assumeLeafIsSafe && !node.isLeaf)
+            ) {
+                // Try to acquire read lock...
+                bool acquired = node._rwLock.TryEnterReadLock(timeoutMs);
+                // Always release existing locks, even if failed to acquire
+                ExitLatchChain(ref lockBuffer);
+                if (acquired) {
+                    lockBuffer.push(node);
+                }
+                return acquired ? LatchAccessResult.acquired : LatchAccessResult.timedOut;
+            } else {
+                // try to acquire a write lock...
+                if (!node._rwLock.TryEnterWriteLock(timeoutMs)) {
+                    // If failed to get the lock.. release locks
+                    ExitLatchChain(ref lockBuffer);
+                    return LatchAccessResult.timedOut;
+                }
+
+                // Check if it is safe to update node
+                if (node.NodeIsSafe(in accessType)) {
+                    ExitLatchChain(ref lockBuffer); // Exit existing locks
+                    lockBuffer.push(node); // push newly acquired lock to chain
+                    return LatchAccessResult.acquired;
+                }
+
+                // Not safe to update..
+                if (this.assumeLeafIsSafe) {
+                    // if assumingLeafIsafe, then exit latch and return not safe
+                    lockBuffer.push(node); // push newly acquired lock to chain so it gets released too
+                    ExitLatchChain(ref lockBuffer);
+                    return LatchAccessResult.notSafeToUpdateLeaf;
+                }
+
+                // Otherwise... return acquired and don't release any locks
+                lockBuffer.push(node);
+                return LatchAccessResult.acquired;
             }
         }
 
@@ -591,7 +781,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
     /// <summary>
     /// Tree Node with N children. Can be a leaf or an internal node.
     /// </summary>
-    private class ConcurrentKTreeNode<K, V> where K: IComparable<K> {
+    private partial class ConcurrentKTreeNode<K, V> where K: IComparable<K> {
         public ConcurrentKTreeNode(int k, ConcurrentKTreeNode<K, V> parent = null, bool isLeaf = false) {
             if (isLeaf) {
                 this._values = new NodeData<K, V>[k+1];
@@ -608,7 +798,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         private NodeData<K, ConcurrentKTreeNode<K, V>>[] _children;
         private volatile ConcurrentKTreeNode<K, V> _parent;
         private volatile int _count;
-        private volatile ReaderWriterLockSlim _rwLock; // Each node has its own lock
+        public ReaderWriterLockSlim _rwLock { get; private set; } // Each node has its own lock
 
         public bool isLeaf {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -687,11 +877,16 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         private int searchRangeIndex<VType>(in K key, in NodeData<K, VType>[] array, out int compareResult, in bool overflow = false) {
             int index = 0;
             int count = this.Count;
-            while ((compareResult = key.CompareTo(array[index].key)) >= 0) {
-                if (index + 1 >= count) {
-                    return overflow ? count : index;
+            compareResult = 1;
+            for (int i = 0; i < count; i++) {
+                if ((compareResult = key.CompareTo(array[i].key)) >= 0) {
+                    index = i;
+                    if (i + 1 >= count && overflow) {
+                        index = i + 1;
+                    }
+                } else {
+                    break;
                 }
-                index++;
             }
             return index;
         }
@@ -760,11 +955,11 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
             ) {
                 int half = from.Length/2;
                 for (int i = half; i < from.Length; i++) {
-                    to[i] = from[i];
+                    to[i - half] = from[i];
                     from[i] = default(NodeData<K, VType>); // 0 init
                 }
-                fromNode.Count = from.Length - half;
-                toNode.Count = half;
+                fromNode.Count = half;
+                toNode.Count = from.Length - half;
             }
 
             // Check if this node needs to split
@@ -780,6 +975,10 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
                 splitCopy(in this._values, in newNode._values, this, in newNode);
             } else {
                 splitCopy(in this._children, in newNode._children, this, in newNode);
+                // re-parent newNode children to newNode
+                for (int i = 0; i < newNode.Count; i++) {
+                    newNode._children[i].value.Parent = newNode;
+                }
             }
 
             // 3a. Handle root edge case
@@ -788,7 +987,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
                 newRoot._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(this.MinKey, this);
                 newRoot._children[1] = new NodeData<K, ConcurrentKTreeNode<K, V>>(newNode.MinKey, in newNode);
                 newRoot.Count = 2;
-                newRoot.Parent = newRoot;
+                newNode.Parent = newRoot;
                 this.Parent = newRoot;
                 tree.setRoot(newRoot); // Note* newRoot is not locked.. but noone else has ref to it since the root ptr is locked
             // 3b. Otherwise, handle internal node parent
@@ -1022,18 +1221,19 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         /// <param name="timeoutMs"> optional timeout in milliseconds </param>
         /// <param name="startTime"> time in milliseconds since 1970 when call was started. </param>
         /// <returns> success, notFound => (Latch may not be released). all others => Latch is fully released </returns>
-        public static ConcurrentTreeResult_Extended unsafe_TryGetValue(
+        public static ConcurrentTreeResult_Extended unsafe_TryGetValue<LockBuffer>(
             in K key,
             out V value,
             ref SearchResultInfo<K, V> info,
-            ref Latch latch,
+            ref Latch<K, V> latch,
+            ref LockBuffer lockBuffer,
             in ConcurrentSortedDictionary<Key, Value> tree,
             in SearchOptions options = new SearchOptions()
-        ) {
+        ) where LockBuffer: ILockBuffer<K, V> {
             options.assertValid(in latch.accessType);
 
             // Try to enter the root lock
-            if (!latch.tryEnterRootLock(options.timeoutMs)) {
+            if (!latch.TryEnterRootLock(options.timeoutMs)) {
                 value = default(V);
                 info.index = -1;
                 return ConcurrentTreeResult_Extended.timedOut;
@@ -1048,7 +1248,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
             int remainingMs = getRemainingMs(in options.startTime, in options.timeoutMs);
 
             // Try enter latch on this (ie the root node)
-            LatchAccessResult result = info.node.TryEnterLatch(ref latch, in remainingMs);
+            LatchAccessResult result = latch.TryEnterLatch(ref lockBuffer, in info.node, in remainingMs);
             if (result != LatchAccessResult.acquired) {
                 value = default(V);
                 info.index = -1;
@@ -1072,11 +1272,11 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
                     }
                     // Exit latch if reading and not retaining
                     if (latch.accessType == LatchAccessType.read && !latch.retainReaderLock) {
-                        info.node.ExitLatchChain(ref latch);
+                        latch.ExitLatchChain(ref lockBuffer);
                     }
                     return searchResult;
                 } else {
-                    int nextIndex = info.node.searchRangeIndex(in key, in info.node._children);
+                    int nextIndex = options.getMin ? 0 : info.node.searchRangeIndex(in key, in info.node._children);
                     // get next sibling subtree
                     if (nextIndex + 1 < info.node.Count) {
                         info.hasNextSubTree = true;
@@ -1086,7 +1286,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
                     info.node = info.node._children[nextIndex].value;
                     info.depth = depth + 1;
                     // Try Enter latch on next node (which will also atomically exit latch on parent)
-                    if (info.node.TryEnterLatch(ref latch, in remainingMs) != LatchAccessResult.acquired) {
+                    if (latch.TryEnterLatch(ref lockBuffer, in info.node, in remainingMs) != LatchAccessResult.acquired) {
                         value = default(V);
                         info.index = -1;
                         return result == LatchAccessResult.timedOut ?
@@ -1104,7 +1304,7 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
             }
             // maxDepth was reached before finding a result!
             if (latch.accessType == LatchAccessType.read && !latch.retainReaderLock) {
-                info.node.ExitLatchChain(ref latch);
+                latch.ExitLatchChain(ref lockBuffer);
             }
             value = default(V);
             return ConcurrentTreeResult_Extended.notFound;
@@ -1176,11 +1376,14 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
             bool doLargerThanCheck = false;
             int maxDepth = Math.Max(0, tree.Depth - subTreeDepth);
             var searchOptions = new SearchOptions(itemTimeoutMs, maxDepth, true);
-            Latch latch = new Latch(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
+            var latch = new Latch<K, V>(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
+            var readLockBuffer = new LockBuffer2<K, V>();
+            // flag for checking if the final subtree has been returned
+            bool searchFinalSubtree = false;
 
             // Get Min subtree (eg starting point)
             var searchResult = unsafe_TryGetValue(subtree.nextSubTreeKey, out _, ref subtree,
-                ref latch, in tree, searchOptions);
+                ref latch, ref readLockBuffer, in tree, searchOptions);
             if (searchResult == ConcurrentTreeResult_Extended.timedOut) {
                 throw new TimeoutException();
             } else if (searchResult == ConcurrentTreeResult_Extended.notSafeToUpdateLeaf) {
@@ -1213,18 +1416,30 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
                     }
                 } finally {
                     // Release Latch on subtree
-                    subtree.node.ExitLatchChain(ref latch);
+                    latch.ExitLatchChain(ref readLockBuffer);
+                }
+
+                // No need to search again.. this was the final node... just exit
+                if (searchFinalSubtree) {
+                    yield break;
                 }
 
                 // Get next tree
                 searchOptions = new SearchOptions(itemTimeoutMs, maxDepth, false);
-                latch = new Latch(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
+                latch = new Latch<K, V>(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
+                readLockBuffer = new LockBuffer2<K, V>();
+                K nextKey = subtree.nextSubTreeKey; // Note* make copy due to pass-by-reference
                 searchResult = unsafe_TryGetValue(
-                    subtree.nextSubTreeKey, out _, ref subtree, ref latch, in tree, searchOptions);
+                    nextKey, out _, ref subtree, ref latch, ref readLockBuffer, in tree, searchOptions);
                 // If failed due to timout.. or there is no next key
                 if (!subtree.hasNextSubTree) {
-                    subtree.node.ExitLatchChain(ref latch);
-                    yield break;
+                    // If the final node was already searched....
+                    if (searchFinalSubtree) {
+                        latch.ExitLatchChain(ref readLockBuffer);
+                        yield break;
+                    } else { // otherwise.. set flag and do one more pass
+                        searchFinalSubtree = true;
+                    }
                 } else if (searchResult == ConcurrentTreeResult_Extended.timedOut) {
                     throw new TimeoutException();
                 } else if (searchResult == ConcurrentTreeResult_Extended.notSafeToUpdateLeaf) {
@@ -1232,49 +1447,6 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
                 }
                 doLargerThanCheck = true;
             } while (true);
-        }
-
-        public LatchAccessResult TryEnterLatch(ref Latch latch, in int timeoutMs) {
-
-            if (latch.accessType == LatchAccessType.read ||
-                (latch.assumeLeafIsSafe && !this.isLeaf)
-            ) {
-                // Try to acquire read lock...
-                bool acquired = this._rwLock.TryEnterReadLock(timeoutMs);
-                if (acquired) {
-                    latch.latchLength++;
-                }
-                // Release parent lock after acquiring next lock
-                // Even if we failed to gain access, it still needs released
-                ExitParentLatchChain(ref latch);
-                return acquired ? LatchAccessResult.acquired : LatchAccessResult.timedOut;
-            } else {
-                // try to acquire a write lock...
-                if (!this._rwLock.TryEnterWriteLock(timeoutMs)) {
-                    // If failed to get the lock.. release parent and return
-                    ExitParentLatchChain(ref latch);
-                    return LatchAccessResult.timedOut;
-                }
-                // Write lock acquired... increment
-                latch.latchLength++;
-
-                // Check if it is safe to update node
-                if (NodeIsSafe(ref latch)) {
-                    // If it is.. Release parent & return acquired
-                    ExitParentLatchChain(ref latch);
-                    return LatchAccessResult.acquired;
-                }
-
-                // Not safe to update..
-                if (latch.assumeLeafIsSafe) {
-                    // if assumingLeafIsafe, then exit latch and return not safe
-                    ExitLatchChain(ref latch);
-                    return LatchAccessResult.notSafeToUpdateLeaf;
-                }
-
-                // Otherwise... return acquired and don't release parent
-                return LatchAccessResult.acquired;
-            }
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1303,45 +1475,13 @@ public class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyValuePair<K
         /// Check if inserting/deleting on this node will cause a split or merge to parent
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private bool NodeIsSafe(ref Latch latch) {
-            if (latch.accessType == LatchAccessType.insert) {
+        public bool NodeIsSafe(in LatchAccessType accessType) {
+            if (accessType == LatchAccessType.insert) {
                 return canSafelyInsert();
-            } else if (latch.accessType == LatchAccessType.delete) {
+            } else if (accessType == LatchAccessType.delete) {
                 return canSafelyDelete();
             } else {
                 throw new ArgumentException("Unsupported latch access type");
-            }
-        }
-
-        /// <summary>
-        /// Exit the latch at this level and every parent including the rootLock
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void ExitLatchChain(ref Latch latch) {
-            var next = this;
-            while (next != null && latch.latchLength > 0) {
-                latch.latchLength--;
-                if (latch.accessType == LatchAccessType.read ||
-                    (latch.assumeLeafIsSafe && !this.isLeaf)
-                ) {
-                    next._rwLock.ExitReadLock();
-                } else {
-                    next._rwLock.ExitWriteLock();
-                }
-                next = next.Parent;
-            }
-            latch.tryExitRootLock(this.isLeaf);
-        }
-
-        /// <summary>
-        /// Exit the latch chain starting at the parent node of this root
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public void ExitParentLatchChain(ref Latch latch) {
-            if (!this.isRoot) {
-                this.Parent.ExitLatchChain(ref latch);
-            } else {
-                latch.tryExitRootLock(this.isLeaf);
             }
         }
     }
