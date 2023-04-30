@@ -277,7 +277,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         int remainingMs = getRemainingMs(in startTime, in timeoutMs);
         var searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(remainingMs, startTime: startTime);
         // Perform a query to recurse to the deepest node, latching downwards optimistically
-        var getResult = ConcurrentKTreeNode<Key, Value>.unsafe_TryGetValue(in key, out currentValue,
+        var getResult = ConcurrentKTreeNode<Key, Value>.TryGetValue(in key, out currentValue,
             ref info, ref rwLatch, ref rwLockBuffer, this, searchOptions);
         
         // Timeout!
@@ -307,7 +307,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         var writeLockBuffer = new LockBuffer32<Key, Value>();
         remainingMs = getRemainingMs(in startTime, in timeoutMs);
         searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(remainingMs, startTime: startTime);
-        getResult = ConcurrentKTreeNode<Key, Value>.unsafe_TryGetValue(in key, out currentValue,
+        getResult = ConcurrentKTreeNode<Key, Value>.TryGetValue(in key, out currentValue,
             ref info, ref writeLatch, ref writeLockBuffer, this, searchOptions);
 
         // Check if timed out...
@@ -348,7 +348,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             retrievedValue = info.node.GetValue(info.index).value;
             return ConcurrentTreeResult_Extended.alreadyExists;
         }
-        info.node.unsafe_InsertAtThisNode(in key, in value, this);
+        info.node.sync_InsertAtThisNode(in key, in value, this);
         Interlocked.Increment(ref this._count); // increase count
         retrievedValue = value;
         return ConcurrentTreeResult_Extended.success;
@@ -362,7 +362,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         if (getResult == ConcurrentTreeResult_Extended.notFound) {
             return ConcurrentTreeResult_Extended.notFound;
         }
-        info.node.unsafe_DeleteAtThisNode(in key, this);
+        info.node.sync_DeleteAtThisNode(in key, this);
         Interlocked.Decrement(ref this._count); // decrement count
         return ConcurrentTreeResult_Extended.success;
     }
@@ -427,7 +427,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         var searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(timeoutMs);
         var latch = new Latch<Key, Value> (LatchAccessType.read, this._rootLock);
         var readLockBuffer = new LockBuffer2<Key, Value>();
-        var result = ConcurrentKTreeNode<Key, Value>.unsafe_TryGetValue(in key, out value,
+        var result = ConcurrentKTreeNode<Key, Value>.TryGetValue(in key, out value,
             ref searchInfo, ref latch, ref readLockBuffer, this, searchOptions);
         if (result == ConcurrentTreeResult_Extended.timedOut) {
             return SearchResult.timedOut;
@@ -471,7 +471,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
     }
 
     public IEnumerator<KeyValuePair<Key, Value>> GetEnumerator(int itemTimeoutMs = -1, int subTreeDepth = 2) {
-        return ConcurrentKTreeNode<Key, Value>.unsafe_AllItems(this, subTreeDepth, itemTimeoutMs).GetEnumerator();
+        return ConcurrentKTreeNode<Key, Value>.AllItems(this, subTreeDepth, itemTimeoutMs).GetEnumerator();
     }
 
     IEnumerator IEnumerable.GetEnumerator() {
@@ -858,7 +858,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// **WARNING**. This method assumes the calling thread has acquired all write locks needed
         /// for this write.
         /// </summary>
-        public void unsafe_InsertAtThisNode(
+        public void sync_InsertAtThisNode(
             in K key,
             in V value,
             in ConcurrentSortedDictionary<K, V> tree
@@ -1008,7 +1008,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// **WARNING**. This method assumes the calling thread has acquired all write locks needed
         /// for this write.
         /// </summary>
-        public void unsafe_DeleteAtThisNode(
+        public void sync_DeleteAtThisNode(
             in K key,
             in ConcurrentSortedDictionary<K, V> tree
         ) {
@@ -1221,7 +1221,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <param name="timeoutMs"> optional timeout in milliseconds </param>
         /// <param name="startTime"> time in milliseconds since 1970 when call was started. </param>
         /// <returns> success, notFound => (Latch may not be released). all others => Latch is fully released </returns>
-        public static ConcurrentTreeResult_Extended unsafe_TryGetValue<LockBuffer>(
+        public static ConcurrentTreeResult_Extended TryGetValue<LockBuffer>(
             in K key,
             out V value,
             ref SearchResultInfo<K, V> info,
@@ -1354,7 +1354,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <param name="hasAcquiredRootLock"> bool value used for acknowledging root is locked. </param>
         /// <param name="subTreeDepth"> depth subtrees which get read locked. (eg 1=k values locked, 2=k^2 locked, 3=k^3 locked), etc.. </param>
         /// <param name="itemTimeoutMs"> key of the item to be inserted </param>
-        public static IEnumerable<KeyValuePair<K, V>> unsafe_AllItems(
+        public static IEnumerable<KeyValuePair<K, V>> AllItems(
             ConcurrentSortedDictionary<Key, Value> tree,
             int subTreeDepth = 2,
             int itemTimeoutMs = -1
@@ -1382,7 +1382,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             bool searchFinalSubtree = false;
 
             // Get Min subtree (eg starting point)
-            var searchResult = unsafe_TryGetValue(subtree.nextSubTreeKey, out _, ref subtree,
+            var searchResult = TryGetValue(subtree.nextSubTreeKey, out _, ref subtree,
                 ref latch, ref readLockBuffer, in tree, searchOptions);
             if (searchResult == ConcurrentTreeResult_Extended.timedOut) {
                 throw new TimeoutException();
@@ -1429,7 +1429,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 latch = new Latch<K, V>(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
                 readLockBuffer = new LockBuffer2<K, V>();
                 K nextKey = subtree.nextSubTreeKey; // Note* make copy due to pass-by-reference
-                searchResult = unsafe_TryGetValue(
+                searchResult = TryGetValue(
                     nextKey, out _, ref subtree, ref latch, ref readLockBuffer, in tree, searchOptions);
                 // If failed due to timout.. or there is no next key
                 if (!subtree.hasNextSubTree) {
