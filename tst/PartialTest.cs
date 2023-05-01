@@ -3,6 +3,7 @@
 
 namespace System.Collections.Concurrent.Extended;
 
+#nullable disable
 
 // Not using any mocking libraries, want to keep this solution 0 dependencies, so just creating partial class tests & compiling them out
 
@@ -14,14 +15,16 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
         Test.Assert(this.Count == numItems);
 
         int actualItemCount = 0, minLeafDepth = int.MaxValue, maxLeafDepth = 0;
-        this._root.assertStateAndCount(0, ref actualItemCount, ref minLeafDepth, ref maxLeafDepth);
+        HashSet<Key> keySet = new HashSet<Key>(); Key prev = default(Key); bool setPrev = false;
+        this._root.assertStateAndCount(0, ref actualItemCount, ref minLeafDepth, ref maxLeafDepth, keySet, ref prev, ref setPrev);
+        Test.Assert(keySet.Count == actualItemCount); // assert global uniqueness
         Test.Assert(numItems == actualItemCount);
         Test.Assert(minLeafDepth == maxLeafDepth); // all leafs should be same depth
     }
 
     private partial class ConcurrentKTreeNode<K, V> where K: IComparable<K> {
 
-        void assertArrayState<VType>(NodeData<K, VType>[] array) {
+        void assertArrayState<VType>(NodeData<K, VType>[] array, HashSet<K> allKeysSet, bool isLeaf, ref K prev, ref bool setPrev) {
             // Assert count by checking for default...
             // the test assumes default values aren't used as valid keys only for test purposes
             HashSet<K> keySet = new HashSet<K>();
@@ -29,6 +32,18 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
                 Test.AssertNotEqual(default(K), array[i].key);
                 Test.AssertNotEqual(default(VType), array[i].value);
                 keySet.Add(array[i].key);
+                if (allKeysSet != null) {
+                    allKeysSet.Add(array[i].key);
+                }
+                if (isLeaf) {
+                    if (!setPrev) {
+                        prev = array[i].key;
+                        setPrev = true;
+                    } else {
+                        Test.Assert(array[i].key.CompareTo(prev) > 0); // leaf values should always be globally increasing
+                        prev = array[i].key;
+                    }
+                }
             }
             Test.Assert(keySet.Count == this.Count); // assert all keys unique
             for (int i= this.Count; i < array.Length; i++) {
@@ -40,7 +55,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
             }
         }
 
-        public void assertStateAndCount(int depth, ref int itemCount, ref int minLeafDepth, ref int maxLeafDepth) {
+        public void assertStateAndCount(int depth, ref int itemCount, ref int minLeafDepth, ref int maxLeafDepth, HashSet<K> allKeysSet, ref K prev, ref bool setPrev) {
             if (!this.isRoot) Test.Assert(!this.canSplit() && !this.canMerge()); // all nodes should have appriate number of children (between k/2 and k-1)
             else Test.Assert(!this.canSplit());
 
@@ -48,21 +63,24 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
 
             if (this.isLeaf) {
                 Test.AssertEqual(null, this._children);
-                assertArrayState(this._values);
+                assertArrayState(this._values, allKeysSet, true, ref prev, ref setPrev);
                 itemCount += this.Count;
                 minLeafDepth = Math.Min(minLeafDepth, depth);
                 maxLeafDepth = Math.Max(maxLeafDepth, depth);
             } else {
                 Test.AssertEqual(null, this._values);
-                assertArrayState(this._children);
+                assertArrayState(this._children, null, false, ref prev, ref setPrev);
                 for (int i = 0; i < this.Count; i++) {
-                    this._children[i].value.assertStateAndCount(depth + 1, ref itemCount, ref minLeafDepth, ref maxLeafDepth);
+                    this._children[i].value.assertStateAndCount(depth + 1, ref itemCount, ref minLeafDepth, ref maxLeafDepth, allKeysSet, ref prev, ref setPrev);
                     Test.Assert(ReferenceEquals(this._children[i].value.Parent, this)); // assert correct parents
+                    Test.Assert(i == 0 || this._children[i].value.MinKey.CompareTo(this._children[i].key) >= 0);
                 }
             }
         }
     }
 
 }
+
+#nullable restore
 
 #endif
