@@ -825,13 +825,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             return ref this._values[index];
         }
 
-        public K MinKey {
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get {
-                return this.isLeaf ? this._values[0].key : this._children[0].key;
-            }
-        }
-
         public int Count {
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get {
@@ -964,19 +957,35 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             /// <summary>
             /// copy right half of array from -> to and zero-initialize copied indices in 'from'
             /// </summary>
-            void splitCopy<VType>(
-                in NodeData<K, VType>[] from,
-                in NodeData<K, VType>[] to,
-                in ConcurrentKTreeNode<K, V> fromNode,
-                in ConcurrentKTreeNode<K, V> toNode
+            void splitCopy(
+                in ConcurrentKTreeNode<K, V> from,
+                in ConcurrentKTreeNode<K, V> to,
+                out K newNodeMinKey
             ) {
-                int half = from.Length/2;
-                for (int i = half; i < from.Length; i++) {
-                    to[i - half] = from[i];
-                    from[i] = default(NodeData<K, VType>); // 0 init
+                int arrLength = from.k + 1;
+                int half = arrLength / 2;
+                if (from.isLeaf) {
+                    for (int i = half; i < arrLength; i++) {
+                        to._values[i - half] = from._values[i];
+                        from._values[i] = default(NodeData<K, V>); // 0 init
+                    }
+                    newNodeMinKey = to._values[0].key;
+                } else {
+                    // set default key for new node
+                    newNodeMinKey = from._children[half].key;
+                    to._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(default(K), from._children[half].value);
+                    to._children[0].value.Parent = to;
+                    from._children[half] = default(NodeData<K, ConcurrentKTreeNode<K, V>>); // default
+                    // set the rest
+                    for (int i = half + 1; i < arrLength; i++) {
+                        to._children[i - half] = new NodeData<K, ConcurrentKTreeNode<K, V>>(
+                            from._children[i].key, from._children[i].value);
+                        to._children[i - half].value.Parent = to; // copy parent ref
+                        from._children[i] = default(NodeData<K, ConcurrentKTreeNode<K, V>>); // 0 init
+                    }
                 }
-                fromNode.Count = half;
-                toNode.Count = from.Length - half;
+                from.Count = half;
+                to.Count = arrLength - half;
             }
 
             // Check if this node needs to split
@@ -988,33 +997,23 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             var newNode = new ConcurrentKTreeNode<K, V>(this.k, this.Parent, this.isLeaf);
 
             // 2. Copy k/2 largest from this node to the new node
-            if (this.isLeaf) {
-                splitCopy(in this._values, in newNode._values, this, in newNode);
-            } else {
-                splitCopy(in this._children, in newNode._children, this, in newNode);
-                // re-parent newNode children to newNode
-                for (int i = 0; i < newNode.Count; i++) {
-                    newNode._children[i].value.Parent = newNode;
-                }
-            }
+            K newNodeMinKey;
+            splitCopy(this, in newNode, out newNodeMinKey);
 
             // 3a. Handle root edge case
             if (this.isRoot) {
                 var newRoot = new ConcurrentKTreeNode<K, V>(this.k, null, false);
-                newRoot._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(this.MinKey, this);
-                newRoot._children[1] = new NodeData<K, ConcurrentKTreeNode<K, V>>(newNode.MinKey, in newNode);
+                newRoot._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(default(K), this);
+                newRoot._children[1] = new NodeData<K, ConcurrentKTreeNode<K, V>>(newNodeMinKey, in newNode);
                 newRoot.Count = 2;
                 newNode.Parent = newRoot;
                 this.Parent = newRoot;
                 tree.setRoot(newRoot); // Note* newRoot is not locked.. but noone else has ref to it since the root ptr is locked
             // 3b. Otherwise, handle internal node parent
             } else {
-                // Update the parent node key to latest min value (the index of this node will not change)
-                // because it contain the k/2 smallest items
-                int thisNodeIndex = this.Parent.indexOfNode(this);
-                this.Parent._children[thisNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(this.MinKey, this);
+                var thisNodeIndex = this.Parent.indexOfNode(this);
                 // Insert new node into the parent
-                this.Parent.orderedInsert(newNode.MinKey, in this.Parent._children, in newNode);
+                this.Parent.indexInsert(thisNodeIndex + 1, newNodeMinKey, in this.Parent._children, in newNode);
                 // Try recurse on parent
                 this.Parent.trySplit(in tree);
             }
@@ -1043,99 +1042,141 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             /// <summary>
             /// Merge 'left' into 'right'. Update parent accordingly.
             /// </summary>
-            void mergeLeft<VType>(
+            void mergeLeft(
                 in ConcurrentKTreeNode<K, V> left,
                 in ConcurrentKTreeNode<K, V> right,
-                in NodeData<K, VType>[] leftArray,
-                in NodeData<K, VType>[] rightArray,
                 in int leftNodeIndex,
                 in int rightNodeIndex
             ) {
-                // We are copying all items from 'left' into 'right. Since left will be strictly less than right,
-                // the 'key' in the parent array for the right node needs to be updated to reflect its new smallest value
-                right.Parent._children[rightNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(left.MinKey, right);
-                // De-parent the left node
-                left.Parent.deleteIndex(in leftNodeIndex, left.Parent._children);
-                left._parent = null;
-                // Shift rightArray right by left.Count
-                for (int i = right.Count - 1; i >= 0; i--) {
-                    rightArray[i + left.Count] = rightArray[i];
-                }
+                var leftAncestorKey = left.Parent._children[leftNodeIndex].key;
+                var rightAncestorKey = right.Parent._children[rightNodeIndex].key;
+
                 // Perform Copy
-                for (int i = 0; i < left.Count; i++) {
-                    rightArray[i] = leftArray[i];
-                    leftArray[i] = default(NodeData<K, VType>);
+                if (left.isLeaf) {
+                    for (int i = right.Count - 1; i >= 0; i--) { // Shift rightArray right by left.Count
+                        right._values[i + left.Count] = right._values[i];
+                    }
+                    for (int i = 0; i < left.Count; i++) {
+                        right._values[i] = left._values[i];
+                        left._values[i] = default(NodeData<K, V>);
+                    }
+                } else {
+                    // Update right key to be non default in preparation for being (not in the front anymore)
+                    right._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(rightAncestorKey, right._children[0].value);
+                    for (int i = right.Count - 1; i >= 0; i--) {
+                        right._children[i + left.Count] = right._children[i];
+                    }
+                    for (int i = 0; i < left.Count; i++) {
+                        right._children[i] = new NodeData<K, ConcurrentKTreeNode<K, V>>(
+                            left._children[i].key, left._children[i].value);
+                        right._children[i].value.Parent = right; // update parent ref
+                        left._children[i] = default(NodeData<K, ConcurrentKTreeNode<K, V>>); // clear
+                    }
                 }
                 // Update Counts
                 right.Count += left.Count;
                 left.Count = 0;
+                // De-parent the left node
+                left.Parent.deleteIndex(in leftNodeIndex, left.Parent._children);
+                left._parent = null;
+                // right is shifted left by one
+                right.Parent._children[rightNodeIndex - 1] = new NodeData<K, ConcurrentKTreeNode<K, V>>(leftAncestorKey, right);
             }
             /// <summary>
             /// Merge 'right' into 'left'. Upate parent accordingly.
             /// </summary>
-            void mergeRight<VType>(
+            void mergeRight(
                 in ConcurrentKTreeNode<K, V> left,
                 in ConcurrentKTreeNode<K, V> right,
-                in NodeData<K, VType>[] leftArray,
-                in NodeData<K, VType>[] rightArray,
                 in int leftNodeIndex,
                 in int rightNodeIndex
             ) {
-                left.Parent._children[leftNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(left.MinKey, left);
-                // De-Parent the right node
-                right.Parent.deleteIndex(in rightNodeIndex, in right.Parent._children);
-                right._parent = null;
+                var rightAncestorKey = right.Parent._children[rightNodeIndex].key;
+
                 // Perform copy
-                for (int rightArrayIndex = 0; rightArrayIndex < right.Count; rightArrayIndex++) {
-                    leftArray[left.Count + rightArrayIndex] = rightArray[rightArrayIndex];
-                    rightArray[rightArrayIndex] = default(NodeData<K, VType>);
+                if (right.isLeaf) {
+                    for (int i = 0; i < right.Count; i++) {
+                        left._values[left.Count + i] = right._values[i];
+                        right._values[i] = default(NodeData<K, V>);
+                    }
+                } else {
+                    // Update right key to be non default in preparation for being (not in the front anymore)
+                    right._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(rightAncestorKey, right._children[0].value);
+                    for (int i = 0; i < right.Count; i++) {
+                        left._children[left.Count + i] = new NodeData<K, ConcurrentKTreeNode<K, V>>(
+                            right._children[i].key, right._children[i].value);
+                        left._children[left.Count + i].value.Parent = left; // update parent
+                        right._children[i] = default(NodeData<K, ConcurrentKTreeNode<K,V>>); // clear
+                    }
                 }
                 // Update Counts
                 left.Count += right.Count;
                 right.Count = 0;
+                // De-Parent the right node
+                right.Parent.deleteIndex(in rightNodeIndex, in right.Parent._children);
+                right._parent = null;
             }
             /// <summary>
             /// Adopt left to right. 
             /// </summary>
-            int adoptLeft<VType>(
+            void adoptLeft(
                 in ConcurrentKTreeNode<K, V> left,
                 in ConcurrentKTreeNode<K, V> right,
-                in NodeData<K, VType>[] leftArray,
-                in NodeData<K, VType>[] rightArray,
                 in int leftNodeIndex,
                 in int rightNodeIndex
             ) {
-                // Insert into right & delete from left
-                int leftArrayIndex = left.Count - 1;
-                int insertedIndex = right.indexInsert(0, in leftArray[leftArrayIndex].key, in rightArray, in leftArray[leftArrayIndex].value);
-                leftArray[leftArrayIndex] = default(NodeData<K, VType>);
-                left.Count--;
+                int leftArrayIndex = left.Count - 1; // (index of max in left node)
 
-                // Update keys for parents
-                right.Parent._children[rightNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(right.MinKey, right);
-                left.Parent._children[leftNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(left.MinKey, left);
-                return insertedIndex;
+                K newParentMin;
+                var rightAncestorKey = right.Parent._children[rightNodeIndex].key;
+
+                if (this.isLeaf) { // copy from left[count-1] to right [0]
+                    newParentMin = left._values[leftArrayIndex].key;
+                    right.indexInsert(0, in left._values[leftArrayIndex].key, in right._values, in left._values[leftArrayIndex].value);
+                    left._values[leftArrayIndex] = default(NodeData<K, V>);
+                } else {
+                    newParentMin = left._children[leftArrayIndex].key;
+                    // Update right key to be non default in preparation for being (not in the front anymore)
+                    right._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(rightAncestorKey, right._children[0].value);
+                    int insertedIndex = right.indexInsert(0, default(K),
+                        in right._children, in left._children[leftArrayIndex].value);
+                    right._children[insertedIndex].value.Parent = right; // update parent ref
+                    left._children[leftArrayIndex] = default(NodeData<K, ConcurrentKTreeNode<K, V>>);
+                }
+                // Update parent keys
+                right.Parent._children[rightNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(newParentMin, right);
+                // Update counts
+                left.Count--;
             }
             /// <summary>
             /// Adopt right into left. 
             /// </summary>
-            int adoptRight<VType>(
+            void adoptRight(
                 in ConcurrentKTreeNode<K, V> left,
                 in ConcurrentKTreeNode<K, V> right,
-                in NodeData<K, VType>[] leftArray,
-                in NodeData<K, VType>[] rightArray,
                 in int leftNodeIndex,
                 in int rightNodeIndex
             ) {
-                // Insert into left & delete from right
-                leftArray[left.Count] = rightArray[0]; // copy from right
-                left.Count++;
-                right.deleteIndex(0, rightArray);
+                K newParentMin;
+                var rightAncestorKey = right.Parent._children[rightNodeIndex].key;
 
-                // Update keys for parents
-                right.Parent._children[rightNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(right.MinKey, right);
-                left.Parent._children[leftNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(left.MinKey, left);
-                return left.Count - 1;
+                if (right.isLeaf) { // copy right[0] to left[count]
+                    newParentMin = right._values[1].key; // new parent min will be the next key...
+                    left._values[left.Count] = right._values[0];
+                    right.deleteIndex(0, right._values);
+                } else {
+                    newParentMin = right._children[1].key;
+                    left._children[left.Count] = new NodeData<K, ConcurrentKTreeNode<K, V>>(rightAncestorKey,
+                        right._children[0].value);
+                    left._children[left.Count].value.Parent = left; // update parent ref
+                    right.deleteIndex(0, right._children);
+                    // reset the key on the first index in the right array
+                    right._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(default(K), right._children[0].value);
+                }
+                // Update parent keys
+                right.Parent._children[rightNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(newParentMin, right);
+                // update counts
+                left.Count++;
             }
 
             // 1. Check if this node needs to merge or adopt
@@ -1165,52 +1206,19 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
 
             // 3. Try to Adopt from left
             if (!ReferenceEquals(null, left) && left.canSafelyDelete()) {
-                if (isLeaf) adoptLeft(in left, this, in left._values, in this._values, in leftIndex, in nodeIndex);
-                else {
-                    // refresh 0 index minkey (necessary because children array keys are not sync'd to the actual MinKey of the child
-                    // and for the '0' item in particular... it can be larger than the actual min when a new min value is inserted or the min is deleted
-                    // without updating the parent node (ie a safe update)
-                    this._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(this._children[0].value.MinKey, this._children[0].value);
-                    int adoptIndex = adoptLeft(in left, this, in left._children, in this._children, in leftIndex, in nodeIndex);
-                    this._children[adoptIndex].value.Parent = this; // update parent ref of copied child
-                }
+                adoptLeft(in left, this, in leftIndex, in nodeIndex);
                 return;
             }
-
             // 4. Try to Adopt from right
             if (!ReferenceEquals(null, right) && right.canSafelyDelete()) {
-                if (isLeaf) adoptRight(this, in right, in this._values, in right._values, in nodeIndex, in rightIndex);
-                else { 
-                    // refresh index 0 minkey
-                    right._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(right._children[0].value.MinKey, right._children[0].value);
-                    int adoptIndex = adoptRight(this, in right, in this._children, in right._children, in nodeIndex, in rightIndex);
-                    this._children[adoptIndex].value.Parent = this; // update parent ref of copied child
-                }
+                adoptRight(this, in right, in nodeIndex, in rightIndex);
                 return;
             }
-
             // 5a. Merge Right if possible
-            if (!ReferenceEquals(null, right)) {
-                if (isLeaf) mergeRight(this, right, this._values, right._values, in nodeIndex, rightIndex);
-                else {
-                    // Update the parent refs for all the children to be copied...
-                    for (int i = 0; i < right.Count; i++) { right._children[i].value.Parent = this; }
-                    // Refresh the index 0 key to its actual value before copying
-                    right._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(right._children[0].value.MinKey, right._children[0].value);
-                    mergeRight(this, in right, in this._children, in right._children, in nodeIndex, in rightIndex);
-                }
+            if (!ReferenceEquals(null, right)) mergeRight(this, in right, in nodeIndex, in rightIndex);
             // 5b. Otherwise Merge left
-            } else {
-                if (isLeaf) mergeLeft(in left, this, in left._values, in this._values, in leftIndex, in nodeIndex);
-                else { 
-                    // Update the parent refs for all the children to be copied...
-                    for (int i = 0; i < left.Count; i++) { left._children[i].value.Parent = this; }
-                    // Refresh the index 0 key to its actual value before copying
-                    this._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(this._children[0].value.MinKey, this._children[0].value);
-                    mergeLeft(in left, this, in left._children, in this._children, in leftIndex, in nodeIndex);
-                }
-            }
-
+            else mergeLeft(in left, this, in leftIndex, in nodeIndex);
+ 
             // 6. Try to merge recurse on parent
             parent.tryMerge(in tree);
         }

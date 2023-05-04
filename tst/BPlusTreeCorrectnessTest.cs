@@ -124,46 +124,51 @@ public class BPlusTreeCorrectnessTest {
             tree.AssertTreeState(0);
         }
 
-        public void rand_add_remove_test(int k, List<ValueTuple<K, V>> pairs, int ms = 10000, bool alwaysAssertTreeState = false) {
+        public void rand_add_remove_test(int k, List<ValueTuple<K, V>> pairs, int ops = 1000000, bool alwaysAssertTreeState = false) {
             var tree = new ConcurrentSortedDictionary<K, V>(k);
             var rand = new Random(k * pairs.Count/2);
             var randPairs = pairs.OrderBy(pair => rand.Next()).ToList();
             var start = DateTimeOffset.Now.ToUnixTimeMilliseconds();
             int opCount = 0;
             while (true) {
-                
-                if (opCount == 481896) {
-                    Console.WriteLine("wow");
-                }
 
                 // Try add rand.. try remove rand
                 var nextPair = randPairs[rand.Next() % randPairs.Count];
-                tree.TryAdd(nextPair.Item1, nextPair.Item2);
+                bool added = tree.TryAdd(nextPair.Item1, nextPair.Item2);
 
-                tree.AssertTreeState(tree.Count);
+                if (added) {
+                    Test.Assert(tree.ContainsKey(nextPair.Item1));
+                    opCount++;
+                }
 
                 nextPair = randPairs[rand.Next() % randPairs.Count];
-                tree.TryRemove(nextPair.Item1);
+                bool removed = tree.TryRemove(nextPair.Item1);
 
-                if (alwaysAssertTreeState || rand.Next() % 100 == 0) {
+                if (removed) {
+                    Test.Assert(!tree.ContainsKey(nextPair.Item1));
+                    opCount++;
+                }
+
+                if (alwaysAssertTreeState || rand.Next() % pairs.Count == 0) {
                     tree.AssertTreeState(tree.Count);
                 }
 
                 opCount += 2;
 
-                var elaspsed = DateTimeOffset.Now.ToUnixTimeMilliseconds() - start;
-                if (elaspsed > ms) {
+                if (opCount > ops) {
                     break;
                 }
             }
+            var elaspsed = DateTimeOffset.Now.ToUnixTimeMilliseconds() - start;
 
-            Console.WriteLine("Finished rand-read-write: [k:" + k + "] [" + (ms / 1000.0) + " seconds] [" + opCount + " ops].");
+            Console.WriteLine("Finished rand-read-write: [k:" + k + "] [" + (elaspsed / 1000.0) + " seconds] [" + pairs.Count + " items ] [" + opCount + " ops].");
         }
     }
 
     public void run() {
 
         // TODO.. Reached max depth test!
+        // TODO pass latches in the insert/delete and check that it doesn't try to read/write to unlocked node
 
         // singles tests
         foreach (var k in Test.K_Range) {
@@ -190,72 +195,93 @@ public class BPlusTreeCorrectnessTest {
             .ToList();
         tentest.addall_removeall_test(3, tentest_pairs, alwaysAssertTreeState: true);
         tentest.addall_removeall_test(4, tentest_pairs.ToList(), alwaysAssertTreeState: true);
-        //tentest.rand_add_remove_test(3, tentest_pairs, 1000, alwaysAssertTreeState: true);
+        tentest.rand_add_remove_test(3, tentest_pairs, alwaysAssertTreeState: true);
         tentest.rand_add_remove_test(3, Enumerable.Range(1, 18)
             .Select(x => new ValueTuple<int, int>(x, -x))
-            .ToList(), 10000, alwaysAssertTreeState: true);
+            .ToList(), alwaysAssertTreeState: true);
 
+
+        List<Thread> threads = new List<Thread>();
         // run tests on different types for many 'k' values and tree sizes
         foreach (var k in Test.K_Range) {
             foreach (var count in Test.Item_Count_Small) {
-                var intrange = Enumerable.Range(1, count);
-                // int int tests
-                var intint = new TypedTest<int, int>();
-                var intint_pairs = intrange
-                    .Select(x => new ValueTuple<int, int>(x, -x))
-                    .ToList();
-                intint.addall_removeall_test(k, intint_pairs);
+                var t = new Thread(() => {
+                    var intrange = Enumerable.Range(1, count);
+                    // int int tests
+                    var intint = new TypedTest<int, int>();
+                    var intint_pairs = intrange
+                        .Select(x => new ValueTuple<int, int>(x, -x))
+                        .ToList();
+                    intint.addall_removeall_test(k, intint_pairs);
 
-                var stringstring = new TypedTest<string, string>();
-                var stringstring_pairs = intrange
-                    .Select(x => new ValueTuple<string, string>(x.ToString(), (-x).ToString()))
-                    .ToList();
-                stringstring.addall_removeall_test(k, stringstring_pairs);
+                    var stringstring = new TypedTest<string, string>();
+                    var stringstring_pairs = intrange
+                        .Select(x => new ValueTuple<string, string>(x.ToString(), (-x).ToString()))
+                        .ToList();
+                    stringstring.addall_removeall_test(k, stringstring_pairs);
 
-                var structclass = new TypedTest<CustomStruct, CustomClass>();
-                var structclass_pairs = intrange
-                    .Select(x => new ValueTuple<CustomStruct,CustomClass>(new CustomStruct(x), new CustomClass(-x)))
-                    .ToList();
-                structclass.addall_removeall_test(k, structclass_pairs);
+                    var structclass = new TypedTest<CustomStruct, CustomClass>();
+                    var structclass_pairs = intrange
+                        .Select(x => new ValueTuple<CustomStruct,CustomClass>(new CustomStruct(x), new CustomClass(-x)))
+                        .ToList();
+                    structclass.addall_removeall_test(k, structclass_pairs);
 
-                var classstruct = new TypedTest<CustomClass, CustomStruct>();
-                var classstruct_pairs = intrange
-                    .Select(x => new ValueTuple<CustomClass, CustomStruct>(new CustomClass(x), new CustomStruct(-x)))
-                    .ToList();
-                classstruct.addall_removeall_test(k, classstruct_pairs);
+                    var classstruct = new TypedTest<CustomClass, CustomStruct>();
+                    var classstruct_pairs = intrange
+                        .Select(x => new ValueTuple<CustomClass, CustomStruct>(new CustomClass(x), new CustomStruct(-x)))
+                        .ToList();
+                    classstruct.addall_removeall_test(k, classstruct_pairs);
+                });
+                t.Start();
+                threads.Add(t);
             }
             Console.WriteLine("Finished [k:" + k.ToString() + "] tree correctness test.");
         }
 
+        foreach (var t in threads)
+            t.Join();
+
+        // Perform 1 million random ops for every combo of 'k' and various item counts
+        // additionally every 'N' ops, there is a full recursion through the tree to validate ordering, parent refs, balancing, and other tree properties
+        threads = new List<Thread>();
         foreach (var k in Test.K_Range) {
             foreach (var count in Test.Item_Count_Small) {
-                var intrange = Enumerable.Range(1, count);
-                // int int tests
-                var intint = new TypedTest<int, int>();
-                var intint_pairs = intrange
-                    .Select(x => new ValueTuple<int, int>(x, -x))
-                    .ToList();
-                intint.rand_add_remove_test(k, intint_pairs);
 
-                var stringstring = new TypedTest<string, string>();
-                var stringstring_pairs = intrange
-                    .Select(x => new ValueTuple<string, string>(x.ToString(), (-x).ToString()))
-                    .ToList();
-                stringstring.rand_add_remove_test(k, stringstring_pairs);
+                var t = new Thread(() => {
+                    var intrange = Enumerable.Range(1, count);
+                    // int int tests
+                    var intint = new TypedTest<int, int>();
+                    var intint_pairs = intrange
+                        .Select(x => new ValueTuple<int, int>(x, -x))
+                        .ToList();
+                    intint.rand_add_remove_test(k, intint_pairs);
 
-                var structclass = new TypedTest<CustomStruct, CustomClass>();
-                var structclass_pairs = intrange
-                    .Select(x => new ValueTuple<CustomStruct,CustomClass>(new CustomStruct(x), new CustomClass(-x)))
-                    .ToList();
-                structclass.rand_add_remove_test(k, structclass_pairs);
+                    var stringstring = new TypedTest<string, string>();
+                    var stringstring_pairs = intrange
+                        .Select(x => new ValueTuple<string, string>(x.ToString(), (-x).ToString()))
+                        .ToList();
+                    stringstring.rand_add_remove_test(k, stringstring_pairs);
 
-                var classstruct = new TypedTest<CustomClass, CustomStruct>();
-                var classstruct_pairs = intrange
-                    .Select(x => new ValueTuple<CustomClass, CustomStruct>(new CustomClass(x), new CustomStruct(-x)))
-                    .ToList();
-                classstruct.rand_add_remove_test(k, classstruct_pairs);
+                    var structclass = new TypedTest<CustomStruct, CustomClass>();
+                    var structclass_pairs = intrange
+                        .Select(x => new ValueTuple<CustomStruct,CustomClass>(new CustomStruct(x), new CustomClass(-x)))
+                        .ToList();
+                    structclass.rand_add_remove_test(k, structclass_pairs);
+
+                    var classstruct = new TypedTest<CustomClass, CustomStruct>();
+                    var classstruct_pairs = intrange
+                        .Select(x => new ValueTuple<CustomClass, CustomStruct>(new CustomClass(x), new CustomStruct(-x)))
+                        .ToList();
+                    classstruct.rand_add_remove_test(k, classstruct_pairs);
+                });
+
+                t.Start();
+                threads.Add(t);
             }
         }
+
+        foreach (var t in threads)
+            t.Join();
     }
 }
 
