@@ -9,7 +9,8 @@ Console.WriteLine("Starting...");
 
 #if DEBUG
 
-new BPlusTreeCorrectnessTest().run();
+new PerfTest().run();
+//new BPlusTreeCorrectnessTest().run();
 
 #endif
 
