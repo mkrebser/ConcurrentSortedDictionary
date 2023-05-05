@@ -285,18 +285,24 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             return ConcurrentTreeResult_Extended.timedOut;
         }
 
+        // If this is a test-before-write- then determine if the test failed
+        bool exitOnTest = true;
+        if (accessType == LatchAccessType.insertTest) {
+            exitOnTest = getResult == ConcurrentTreeResult_Extended.success;
+        } else if (accessType == LatchAccessType.deleteTest) {
+            exitOnTest = getResult == ConcurrentTreeResult_Extended.notFound;
+        }
+
         // If we were able to optimistally acquire latch... (or test op was successful)
         // The write to tree
-        if (getResult != ConcurrentTreeResult_Extended.notSafeToUpdateLeaf) {
+        if (getResult != ConcurrentTreeResult_Extended.notSafeToUpdateLeaf || exitOnTest) {
             try {
                 if (rwLatch.isInsertAccess) {
                     tryUpdateDepth(info.depth);
-                    return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue, 
-                        accessType == LatchAccessType.insertTest && getResult == ConcurrentTreeResult_Extended.success);
+                    return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue, exitOnTest);
                 } else {
                     retrievedValue = default(Value);
-                    return writeDeletion(in key, in info, in getResult, 
-                        accessType == LatchAccessType.deleteTest && getResult == ConcurrentTreeResult_Extended.notFound);
+                    return writeDeletion(in key, in info, in getResult, exitOnTest);
                 }
             } finally {
                 rwLatch.ExitLatchChain(ref rwLockBuffer);
@@ -340,11 +346,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         in ConcurrentTreeResult_Extended getResult,
         in bool overwrite,
         out Value retrievedValue,
-        in bool failedTest
+        in bool exitOnTest
     ) {
         // If the vaue already exists...
         if (getResult == ConcurrentTreeResult_Extended.success) {
-            if (overwrite && !failedTest) {
+            if (overwrite && !exitOnTest) {
                 info.node.SetValue(info.index, in key, in value);
                 retrievedValue = value;
                 return ConcurrentTreeResult_Extended.success;
@@ -362,9 +368,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         in Key key,
         in SearchResultInfo<Key, Value> info,
         in ConcurrentTreeResult_Extended getResult,
-        in bool failedTest
+        in bool exitOnTest
     ) {
-        if (getResult == ConcurrentTreeResult_Extended.notFound || failedTest) {
+        if (getResult == ConcurrentTreeResult_Extended.notFound || exitOnTest) {
             return ConcurrentTreeResult_Extended.notFound;
         }
         info.node.sync_DeleteAtThisNode(in key, this);
@@ -1354,10 +1360,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     }
                     // Exit latch if reading and not retaining
                     if (latch.isReadAccess && !latch.retainReaderLock) {
-                        latch.ExitLatchChain(ref lockBuffer);
-                    }
-                    // Exit latch if unsafe to update leaf
-                    if (result == LatchAccessResult.notSafeToUpdateLeafTest) {
                         latch.ExitLatchChain(ref lockBuffer);
                     }
                     return searchResult;
