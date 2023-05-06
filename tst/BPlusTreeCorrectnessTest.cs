@@ -31,6 +31,7 @@ public class BPlusTreeCorrectnessTest {
 
             // Remove it
             Test.Assert(tree.TryRemove(key));
+            tree.AssertTreeState(0);
 
             Test.Assert(tree.Count == 0);
             Test.Assert(tree.IsEmpty);

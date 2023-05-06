@@ -83,6 +83,46 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
         }
 
         private K MinTestKey { get { return this.isLeaf ? this._values[0].key : this._children[1].key; }}
+
+        private volatile int _version;
+        private int assertWriterLock(int version = -1, bool beginWrite = false) {
+            assertWriterLockHeld();
+            if (beginWrite) {
+                return Interlocked.Increment(ref this._version);
+            } else {
+                Test.Assert(_version == version);
+                return version;
+            }
+        }
+        public void assertWriterLockHeld() {
+            Test.Assert(this._rwLock.IsWriteLockHeld);
+            Test.Assert(!this._rwLock.IsReadLockHeld);
+            Test.Assert(!this._rwLock.IsUpgradeableReadLockHeld);
+        }
+        public void assertRootWriteLockHeld(ConcurrentSortedDictionary<K, V> tree) {
+            Test.Assert(tree._rootLock.IsWriteLockHeld);
+            Test.Assert(!tree._rootLock.IsReadLockHeld);
+            Test.Assert(!tree._rootLock.IsUpgradeableReadLockHeld);
+        }
+
+        private int assertLatchLock(ref Latch<K, V> latch,  int version = -1, bool beginRead = false) {
+            if (latch.isReadAccess || (latch.assumeLeafIsSafe && !this.isLeaf)) {
+                Test.Assert(!this._rwLock.IsWriteLockHeld);
+                Test.Assert(this._rwLock.IsReadLockHeld);
+                Test.Assert(!this._rwLock.IsUpgradeableReadLockHeld);
+            } else {
+                Test.Assert(this._rwLock.IsWriteLockHeld);
+                Test.Assert(!this._rwLock.IsReadLockHeld);
+                Test.Assert(!this._rwLock.IsUpgradeableReadLockHeld);
+            }
+
+            if (beginRead) {
+                return this._version;
+            } else {
+                Test.Assert(_version == version);
+                return version;
+            }
+        }
     }
 }
 

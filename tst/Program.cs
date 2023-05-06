@@ -1,4 +1,6 @@
-﻿using System.Collections.Concurrent.Extended;
+﻿#if DEBUG
+
+using System.Collections.Concurrent.Extended;
 
 Console.WriteLine("Starting...");
 
@@ -7,12 +9,14 @@ Console.WriteLine("Starting...");
 // dotnet run --configuration Debug
 // dotnet run --configuration Release
 
-#if DEBUG
 
+new BPlusTreeCorrectnessTest().run();
 new PerfTest().run();
-//new BPlusTreeCorrectnessTest().run();
+new ConcurrencyTest().run();
 
-#endif
 
 
 Console.WriteLine("Success!");
+
+
+#endif

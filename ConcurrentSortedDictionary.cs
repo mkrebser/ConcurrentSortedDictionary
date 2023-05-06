@@ -23,9 +23,8 @@ SOFTWARE.
 */
 
 // Use ConcurrentSortedDictionary_DEBUG for all debugging assertions incase someone wants to change it...
-#if DEBUG
-#define ConcurrentSortedDictionary_DEBUG
-#endif
+//#define ConcurrentSortedDictionary_DEBUG
+
 
 
 using System.Runtime.CompilerServices;
@@ -286,17 +285,21 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         }
 
         // If this is a test-before-write- then determine if the test failed
-        bool exitOnTest = true;
+        bool exitOnTest = false;
         if (accessType == LatchAccessType.insertTest) {
-            exitOnTest = getResult == ConcurrentTreeResult_Extended.success;
+            exitOnTest = info.index > -1; // if it is found.. it must have a positive index
         } else if (accessType == LatchAccessType.deleteTest) {
-            exitOnTest = getResult == ConcurrentTreeResult_Extended.notFound;
+            exitOnTest = info.index < 0; // if it is not found, it will have a negative index
         }
 
+        try {
         // If we were able to optimistally acquire latch... (or test op was successful)
         // The write to tree
-        if (getResult != ConcurrentTreeResult_Extended.notSafeToUpdateLeaf || exitOnTest) {
-            try {
+            if (getResult != ConcurrentTreeResult_Extended.notSafeToUpdateLeaf || exitOnTest) {
+                #if ConcurrentSortedDictionary_DEBUG
+                info.node.assertWriterLockHeld();
+                #endif
+
                 if (rwLatch.isInsertAccess) {
                     tryUpdateDepth(info.depth);
                     return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue, exitOnTest);
@@ -304,9 +307,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     retrievedValue = default(Value);
                     return writeDeletion(in key, in info, in getResult, exitOnTest);
                 }
-            } finally {
-                rwLatch.ExitLatchChain(ref rwLockBuffer);
             }
+        } finally {
+            rwLatch.ExitLatchChain(ref rwLockBuffer);
         }
 
         // Otherwise, try to acquire write access using a full write latch chain
@@ -327,6 +330,10 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         }
 
         try {
+            #if ConcurrentSortedDictionary_DEBUG
+            info.node.assertWriterLockHeld();
+            #endif
+
             if (writeLatch.isInsertAccess) {
                 tryUpdateDepth(info.depth);
                 return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue, false);
@@ -349,7 +356,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         in bool exitOnTest
     ) {
         // If the vaue already exists...
-        if (getResult == ConcurrentTreeResult_Extended.success) {
+        if (getResult == ConcurrentTreeResult_Extended.success || exitOnTest) {
             if (overwrite && !exitOnTest) {
                 info.node.SetValue(info.index, in key, in value);
                 retrievedValue = value;
@@ -770,15 +777,15 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
 
                 // Not safe to update..
                 if (this.assumeLeafIsSafe) {
-                    // if assumingLeafIsafe, then exit latch and return not safe
-                    lockBuffer.push(node); // push newly acquired lock to chain so it gets released too
-                    ExitLatchChain(ref lockBuffer);
+                    lockBuffer.push(node); // push newly acquired lock to chain
 
                     // if test... retain the write lock! (this way we can read the leaf to test it)
                     if (this.accessType == LatchAccessType.insertTest || this.accessType == LatchAccessType.deleteTest) {
                         return LatchAccessResult.notSafeToUpdateLeafTest;
                     }
 
+                    // if assumingLeafIsafe, then exit latch and return not safe
+                    ExitLatchChain(ref lockBuffer);
                     return LatchAccessResult.notSafeToUpdateLeaf;
                 }
 
@@ -1017,8 +1024,16 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 to.Count = arrLength - half;
             }
 
+            #if ConcurrentSortedDictionary_DEBUG
+            int version = assertWriterLock(beginWrite: true);
+            #endif
+
             // Check if this node needs to split
             if (!canSplit()) {
+                #if ConcurrentSortedDictionary_DEBUG
+                assertWriterLock(version);
+                #endif
+
                 return;
             }
 
@@ -1038,6 +1053,10 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 newNode.Parent = newRoot;
                 this.Parent = newRoot;
                 tree.setRoot(newRoot); // Note* newRoot is not locked.. but noone else has ref to it since the root ptr is locked
+
+                #if ConcurrentSortedDictionary_DEBUG
+                assertRootWriteLockHeld(tree);
+                #endif
             // 3b. Otherwise, handle internal node parent
             } else {
                 var thisNodeIndex = this.Parent.indexOfNode(this);
@@ -1208,8 +1227,16 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 left.Count++;
             }
 
+            #if ConcurrentSortedDictionary_DEBUG
+            int version = assertWriterLock(beginWrite: true);
+            #endif
+
             // 1. Check if this node needs to merge or adopt
             if (!canMerge()) {
+                #if ConcurrentSortedDictionary_DEBUG
+                assertWriterLock(version);
+                #endif
+
                 return;
             }
             bool isLeaf = this.isLeaf;
@@ -1221,8 +1248,18 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 if (!isLeaf && this.Count <= 1) {
                     this._children[0].value._parent = null; // remove parent ref (child will become root)
                     tree.setRoot(this._children[0].value); // set new root
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    assertWriterLock(version);
+                    assertRootWriteLockHeld(tree);
+                    #endif
+
                     return;
                 }
+                #if ConcurrentSortedDictionary_DEBUG
+                assertWriterLock(version);
+                #endif
+
                 // Otherwise, root remains...
                 return;
             }
@@ -1236,11 +1273,21 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             // 3. Try to Adopt from left
             if (!ReferenceEquals(null, left) && left.canSafelyDelete()) {
                 adoptLeft(in left, this, in leftIndex, in nodeIndex);
+
+                #if ConcurrentSortedDictionary_DEBUG
+                assertWriterLock(version);
+                #endif
+
                 return;
             }
             // 4. Try to Adopt from right
             if (!ReferenceEquals(null, right) && right.canSafelyDelete()) {
                 adoptRight(this, in right, in nodeIndex, in rightIndex);
+
+                #if ConcurrentSortedDictionary_DEBUG
+                assertWriterLock(version);
+                #endif
+
                 return;
             }
             // 5a. Merge Right if possible
@@ -1345,6 +1392,10 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     ConcurrentTreeResult_Extended.notSafeToUpdateLeaf;
             }
 
+            #if ConcurrentSortedDictionary_DEBUG
+            int version = info.node.assertLatchLock(ref latch, beginRead: true);
+            #endif
+
             for (int depth = 0; depth < options.maxDepth; depth++) {
                 if (info.node.isLeaf) {
                     int compareResult;
@@ -1358,14 +1409,27 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                         info.index = -1;
                         searchResult = ConcurrentTreeResult_Extended.notFound;
                     }
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    info.node.assertLatchLock(ref latch, version);
+                    #endif
+
                     // Exit latch if reading and not retaining
                     if (latch.isReadAccess && !latch.retainReaderLock) {
                         latch.ExitLatchChain(ref lockBuffer);
+                    }
+                    if (result == LatchAccessResult.notSafeToUpdateLeafTest) {
+                        return ConcurrentTreeResult_Extended.notSafeToUpdateLeaf;
                     }
                     return searchResult;
                 } else {
                     if (result == LatchAccessResult.notSafeToUpdateLeafTest)
                         throw new Exception("Failed sanity test");
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    info.node.assertLatchLock(ref latch, version);
+                    #endif
+
                     int nextIndex = options.getMin ? 0 : info.node.searchRangeIndex(in key, in info.node._children);
                     // get next sibling subtree
                     if (nextIndex + 1 < info.node.Count) {
@@ -1375,6 +1439,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     // Move to next node
                     info.node = info.node._children[nextIndex].value;
                     info.depth = depth + 1;
+
                     // Try Enter latch on next node (which will also atomically exit latch on parent)
                     result = latch.TryEnterLatch(ref lockBuffer, in info.node, in remainingMs);
                     if (result == LatchAccessResult.timedOut || result == LatchAccessResult.notSafeToUpdateLeaf) {
@@ -1384,6 +1449,10 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                             ConcurrentTreeResult_Extended.timedOut :
                             ConcurrentTreeResult_Extended.notSafeToUpdateLeaf;
                     }
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    version = info.node.assertLatchLock(ref latch, beginRead: true);
+                    #endif
                 }
 
                 remainingMs = getRemainingMs(in options.startTime, in options.timeoutMs);
