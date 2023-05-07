@@ -123,6 +123,19 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
                 return version;
             }
         }
+
+        private int assertReadLock(int version = -1, bool beginRead = false) {
+            Test.Assert(!this._rwLock.IsWriteLockHeld);
+            Test.Assert(this._rwLock.IsReadLockHeld);
+            Test.Assert(!this._rwLock.IsUpgradeableReadLockHeld);
+
+            if (beginRead) {
+                return this._version;
+            } else {
+                Test.Assert(_version == version);
+                return version;
+            }
+        }
     }
 }
 

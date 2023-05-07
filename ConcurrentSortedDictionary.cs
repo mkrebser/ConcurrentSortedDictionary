@@ -22,12 +22,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-// Use ConcurrentSortedDictionary_DEBUG for all debugging assertions incase someone wants to change it...
+// Used for more nuanced lock testing and sanity test
 //#define ConcurrentSortedDictionary_DEBUG
 
-
-
-using System.Runtime.CompilerServices;
 
 // Put this in the concurrent namespace but with 'Extended'
 namespace System.Collections.Concurrent.Extended;
@@ -293,8 +290,8 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         }
 
         try {
-        // If we were able to optimistally acquire latch... (or test op was successful)
-        // The write to tree
+            // If we were able to optimistally acquire latch... (or test op was successful)
+            // The write to tree
             if (getResult != ConcurrentTreeResult_Extended.notSafeToUpdateLeaf || exitOnTest) {
                 #if ConcurrentSortedDictionary_DEBUG
                 info.node.assertWriterLockHeld();
@@ -353,7 +350,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         in ConcurrentTreeResult_Extended getResult,
         in bool overwrite,
         out Value retrievedValue,
-        in bool exitOnTest
+        in bool exitOnTest // if exitOnTest is true, then this function should never perform a write
     ) {
         // If the vaue already exists...
         if (getResult == ConcurrentTreeResult_Extended.success || exitOnTest) {
@@ -375,7 +372,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         in Key key,
         in SearchResultInfo<Key, Value> info,
         in ConcurrentTreeResult_Extended getResult,
-        in bool exitOnTest
+        in bool exitOnTest // if exitOnTest is true, then this function should never perform a write
     ) {
         if (getResult == ConcurrentTreeResult_Extended.notFound || exitOnTest) {
             return ConcurrentTreeResult_Extended.notFound;
@@ -887,7 +884,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <summary>
         /// Returns index in the array for the input key
         /// </summary>
-        
         private int searchRangeIndex<VType>(in K key, in NodeData<K, VType>[] array, out int compareResult) {
             // Perform a modified binary search to find the 'key' in the array
             // This binary search will return the index of the last bucket that 'key' is greater than or equal to
@@ -918,7 +914,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <summary>
         /// Returns index in the array for the input key
         /// </summary>
-        
         private int searchRangeIndex<VType>(in K key, in NodeData<K, VType>[] array) {
             int cmp;
             return searchRangeIndex(in key, in array, out cmp);
@@ -967,7 +962,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <param name="key"> insert in the bucket this key belongs to </param>
         /// <param name="array"> array to insert into </param>
         /// <param name="value"> value to insert </param>
-        
         private int indexInsert<VType>(
             in int index,
             in K key,
@@ -1294,7 +1288,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             if (!ReferenceEquals(null, right)) mergeRight(this, in right, in nodeIndex, in rightIndex);
             // 5b. Otherwise Merge left
             else mergeLeft(in left, this, in leftIndex, in nodeIndex);
- 
+
+            #if ConcurrentSortedDictionary_DEBUG
+            assertWriterLock(version);
+            #endif
+
             // 6. Try to merge recurse on parent
             parent.tryMerge(in tree);
         }
@@ -1353,9 +1351,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <param name="value"> item to be inserted </param>
         /// <param name="info"> contains search meta data </param>
         /// <param name="latch"> latch used to secure concurrent node access. TryGetValue will always release the entire latch upon exiting except in the case where it is in (insert|delete) and returned notFound or success. </param>
-        /// <param name="timeoutMs"> optional timeout in milliseconds </param>
-        /// <param name="startTime"> time in milliseconds since 1970 when call was started. </param>
-        /// <returns> success, notFound => (Latch may not be released). all others => Latch is fully released </returns>
         public static ConcurrentTreeResult_Extended TryGetValue<LockBuffer>(
             in K key,
             out V value,
@@ -1366,6 +1361,15 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             in SearchOptions options = new SearchOptions()
         ) where LockBuffer: ILockBuffer<K, V> {
             options.assertValid(latch.isReadAccess);
+
+            // Try to retrieve a value.
+            // When this function returns:
+            // timedOut => latch is fully released
+            // notFound,success => if this is a write operation then it is not released
+            //          => if read lock retaining was specified then it is not released
+            //          => otherise, it is released
+            // notSafeToUpdateLeaf => if this is a write-test, then it is not released
+            //                     => otherwise is is released
 
             // Try to enter the root lock
             if (!latch.TryEnterRootLock(options.timeoutMs)) {
@@ -1481,12 +1485,20 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             bool doLargerThanCheck = false,
             int itemTimeoutMs = -1
         ) {
+            #if ConcurrentSortedDictionary_DEBUG
+            int version = -1;
+            #endif
+
             bool enteredMutex = false;
             try {
                 if (!this._rwLock.TryEnterReadLock(itemTimeoutMs)) {
                     throw new TimeoutException();
                 }
                 enteredMutex = true;
+
+                #if ConcurrentSortedDictionary_DEBUG
+                version = assertReadLock(beginRead: true);
+                #endif
 
                 if (this.isLeaf) {
                     for (int i = 0; i < this.Count; i++) {
@@ -1502,7 +1514,14 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     }
                 }
             } finally {
-                if (enteredMutex) this._rwLock.ExitReadLock();
+                if (enteredMutex) {
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    assertReadLock(version);
+                    #endif
+
+                    this._rwLock.ExitReadLock();
+                }
             }
         }
 
@@ -1511,7 +1530,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// It will instead lock subtrees as it iterates through the entire tree.
         /// </summary>
         /// <param name="tree"> tree reference </param>
-        /// <param name="hasAcquiredRootLock"> bool value used for acknowledging root is locked. </param>
         /// <param name="subTreeDepth"> depth subtrees which get read locked. (eg 1=k values locked, 2=k^2 locked, 3=k^3 locked), etc.. </param>
         /// <param name="itemTimeoutMs"> key of the item to be inserted </param>
         public static IEnumerable<KeyValuePair<K, V>> AllItems(
@@ -1551,6 +1569,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             }
 
             do {
+
+                #if ConcurrentSortedDictionary_DEBUG
+                int version = subtree.node.assertLatchLock(ref latch, beginRead: true);
+                #endif
+
                 // Iterate all in current locked tree
                 try {
                     if (subtree.node.isLeaf) { // subtree is leaf
@@ -1575,6 +1598,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                         }
                     }
                 } finally {
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    subtree.node.assertLatchLock(ref latch, version);
+                    #endif
+
                     // Release Latch on subtree
                     latch.ExitLatchChain(ref readLockBuffer);
                 }
@@ -1634,7 +1662,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <summary>
         /// Check if inserting/deleting on this node will cause a split or merge to parent
         /// </summary>
-        
         public bool NodeIsSafe(bool isInsertAccess, bool isDeleteAccess) {
             if (isInsertAccess) {
                 return canSafelyInsert();
