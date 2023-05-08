@@ -135,7 +135,13 @@ public class BPlusTreeCorrectnessTest {
 
                 // Try add rand.. try remove rand
                 var nextPair = randPairs[rand.Next() % randPairs.Count];
-                bool added = tree.TryAdd(nextPair.Item1, nextPair.Item2);
+
+                bool added = true;
+                if (rand.Next() % 5 == 0) {
+                    tree.AddOrUpdate(nextPair.Item1, nextPair.Item2);
+                } else {
+                    added = tree.TryAdd(nextPair.Item1, nextPair.Item2);
+                }
 
                 if (added) {
                     Test.Assert(tree.ContainsKey(nextPair.Item1));
@@ -167,10 +173,6 @@ public class BPlusTreeCorrectnessTest {
     }
 
     public void run() {
-
-        // TODO.. Reached max depth test!
-        // TODO pass latches in the insert/delete and check that it doesn't try to read/write to unlocked node
-
         // singles tests
         foreach (var k in Test.K_Range) {
             // int int tests

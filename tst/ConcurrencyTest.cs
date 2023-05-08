@@ -41,7 +41,12 @@ public class ConcurrencyTest {
 
                         // Try add rand.. try remove rand
                         var nextPair = newList[rand.Next() % newList.Count];
-                        bool added = tree.TryAdd(nextPair.Item1, nextPair.Item2);
+                        bool added = true;
+                        if (rand.Next() % 5 == 0) {
+                            tree.AddOrUpdate(nextPair.Item1, nextPair.Item2);
+                        } else {
+                            added = tree.TryAdd(nextPair.Item1, nextPair.Item2);
+                        }
 
                         if (added) {
                             Test.Assert(tree.ContainsKey(nextPair.Item1));
@@ -114,7 +119,12 @@ public class ConcurrencyTest {
 
                         // Try add rand.. try remove rand
                         var nextPair = newList[rand.Next() % newList.Count];
-                        bool added = tree.TryAdd(nextPair.Item1, nextPair.Item2);
+                        bool added = true;
+                        if (rand.Next() % 5 == 0) {
+                            tree.AddOrUpdate(nextPair.Item1, nextPair.Item2);
+                        } else {
+                            added = tree.TryAdd(nextPair.Item1, nextPair.Item2);
+                        }
 
                         if (added) {
                             Test.Assert(tree.ContainsKey(nextPair.Item1));
