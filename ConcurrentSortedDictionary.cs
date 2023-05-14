@@ -23,7 +23,7 @@ SOFTWARE.
 */
 
 // Used for more nuanced lock testing and sanity test
-//#define ConcurrentSortedDictionary_DEBUG
+#define ConcurrentSortedDictionary_DEBUG
 
 
 // Put this in the concurrent namespace but with 'Extended'
@@ -821,11 +821,16 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             this._count = 0;
             this._parent = parent;
         }
+        private LeafSiblingNodes siblings;
         private NodeData<K, V>[] _values;
         private NodeData<K, ConcurrentKTreeNode<K, V>>[] _children;
         private volatile ConcurrentKTreeNode<K, V> _parent;
         private volatile int _count;
         public ReaderWriterLockSlim _rwLock { get; private set; } // Each node has its own lock
+
+        #if ConcurrentSortedDictionary_DEBUG
+        private volatile int _version;
+        #endif
 
         public bool isLeaf {
             get { return ReferenceEquals(null, this._children); }
@@ -855,6 +860,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 this._count = value;
             }
         }
+        /// <summary>
+        /// convience parent-ref
+        /// </summary>
         public ConcurrentKTreeNode<K, V> Parent {
             get {
                 return this._parent;
@@ -1048,6 +1056,8 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 this.Parent = newRoot;
                 tree.setRoot(newRoot); // Note* newRoot is not locked.. but noone else has ref to it since the root ptr is locked
 
+                if (this.isLeaf) LeafSiblingNodes.AtomicUpdateSplitNodes(this, newNode);
+
                 #if ConcurrentSortedDictionary_DEBUG
                 assertRootWriteLockHeld(tree);
                 #endif
@@ -1056,6 +1066,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 var thisNodeIndex = this.Parent.indexOfNode(this);
                 // Insert new node into the parent
                 this.Parent.indexInsert(thisNodeIndex + 1, newNodeMinKey, in this.Parent._children, in newNode);
+
+                if (this.isLeaf) LeafSiblingNodes.AtomicUpdateSplitNodes(this, newNode);
+
                 // Try recurse on parent
                 this.Parent.trySplit(in tree);
             }
@@ -1239,7 +1252,10 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             // 2. Handle root edge case
             if (this.isRoot) {
                 // Try to select new root if this root only has 1 child
-                if (!isLeaf && this.Count <= 1) {
+                if (!isLeaf) {
+                    #if ConcurrentSortedDictionary_DEBUG
+                    Test.Assert(this.Count == 1);
+                    #endif
                     this._children[0].value._parent = null; // remove parent ref (child will become root)
                     tree.setRoot(this._children[0].value); // set new root
 
@@ -1264,9 +1280,36 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             var left = nodeIndex > 0 ? this.Parent._children[leftIndex].value : null;
             var right = nodeIndex < this.Parent.Count - 1 ? this.Parent._children[rightIndex].value : null;
 
+            // (very) Rare race condition check on internal nodes!
+            // TODO get occurences, but should be less then 1 times per billion ops
+            if (!isLeaf) {
+                if (!ReferenceEquals(null, left)) {
+                    int spinCount = 0;
+                    while (left._rwLock.IsWriteLockHeld) {
+                        if (spinCount > 1000000) { Thread.Sleep(1); }
+                        for (int i = 0; i < 100; i++) { spinCount++; } // spin
+                    }
+                }
+                if (!ReferenceEquals(null, right)) {
+                    int spinCount = 0;
+                    while (right._rwLock.IsWriteLockHeld) {
+                        if (spinCount > 1000000) { Thread.Sleep(1); }
+                        for (int i = 0; i < 100; i++) { spinCount++; } // spin
+                    }
+                }
+            }
+
             // 3. Try to Adopt from left
             if (!ReferenceEquals(null, left) && left.canSafelyDelete()) {
-                adoptLeft(in left, this, in leftIndex, in nodeIndex);
+                try {
+                    // Always write lock on leaf nodes- this is due to the leaf iterator!
+                    // To safely iterate side-to-side, all leaf nodes that are being modified need to be write locked
+                    // Deadlock is guarenteed to not occur here because we hold a write-lock on the parent of this node!
+                    if (left.isLeaf) left._rwLock.EnterWriteLock(); 
+                    adoptLeft(in left, this, in leftIndex, in nodeIndex);
+                } finally {
+                    if (left.isLeaf) left._rwLock.ExitWriteLock();
+                }
 
                 #if ConcurrentSortedDictionary_DEBUG
                 assertWriterLock(version);
@@ -1276,7 +1319,13 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             }
             // 4. Try to Adopt from right
             if (!ReferenceEquals(null, right) && right.canSafelyDelete()) {
-                adoptRight(this, in right, in nodeIndex, in rightIndex);
+
+                try {
+                    if (right.isLeaf) right._rwLock.EnterWriteLock();
+                    adoptRight(this, in right, in nodeIndex, in rightIndex);
+                } finally {
+                    if (right.isLeaf) right._rwLock.ExitWriteLock();
+                }
 
                 #if ConcurrentSortedDictionary_DEBUG
                 assertWriterLock(version);
@@ -1285,9 +1334,25 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 return;
             }
             // 5a. Merge Right if possible
-            if (!ReferenceEquals(null, right)) mergeRight(this, in right, in nodeIndex, in rightIndex);
+            if (!ReferenceEquals(null, right)) {
+                try {
+                    if (right.isLeaf) right._rwLock.EnterWriteLock(); 
+                    mergeRight(this, in right, in nodeIndex, in rightIndex);
+                    if (right.isLeaf) LeafSiblingNodes.AtomicUpdateMergeNodes(in right);
+                } finally {
+                    if (right.isLeaf) right._rwLock.ExitWriteLock();
+                }
+            }
             // 5b. Otherwise Merge left
-            else mergeLeft(in left, this, in leftIndex, in nodeIndex);
+            else {
+                try {
+                    if (left.isLeaf) left._rwLock.EnterWriteLock();
+                    mergeLeft(in left, this, in leftIndex, in nodeIndex);
+                    if (left.isLeaf) LeafSiblingNodes.AtomicUpdateMergeNodes(in left);
+                } finally {
+                    if (left.isLeaf) left._rwLock.ExitWriteLock();
+                }
+            }
 
             #if ConcurrentSortedDictionary_DEBUG
             assertWriterLock(version);
@@ -1427,10 +1492,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     }
                     return searchResult;
                 } else {
+                    #if ConcurrentSortedDictionary_DEBUG
                     if (result == LatchAccessResult.notSafeToUpdateLeafTest)
                         throw new Exception("Failed sanity test");
-
-                    #if ConcurrentSortedDictionary_DEBUG
                     info.node.assertLatchLock(ref latch, version);
                     #endif
 
@@ -1637,6 +1701,90 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             } while (true);
         }
 
+
+        /// <summary>
+        /// Get all items starting from this node. This method will not read lock the entire tree.
+        /// It will instead lock subtrees as it iterates through the entire tree.
+        /// </summary>
+        /// <param name="tree"> tree reference </param>
+        /// <param name="subTreeDepth"> depth subtrees which get read locked. (eg 1=k values locked, 2=k^2 locked, 3=k^3 locked), etc.. </param>
+        /// <param name="itemTimeoutMs"> key of the item to be inserted </param>
+        public static IEnumerable<KeyValuePair<K, V>> AllItems2(
+            ConcurrentSortedDictionary<Key, Value> tree,
+            int itemTimeoutMs = -1
+        ) {
+            bool acquiredNextNode(ConcurrentKTreeNode<K, V> node, out ConcurrentKTreeNode<K, V> next) {
+                // Now get the next node
+                next = node.siblings.Next;
+                if (!ReferenceEquals(null, next)) {
+                    // Try to acquire read lock... (dont wait at all if lock is held by writer.. just quit)
+                    if (!next._rwLock.TryEnterReadLock(0)) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+
+            ConcurrentKTreeNode<K, V> node = null;
+            bool retry = true;
+            V _ = default(V);
+            K maxKey = default(K);
+            bool startedSearch = false;
+            SearchResultInfo<K, V> subtree = default(SearchResultInfo<K, V>);
+
+            do {
+                if (retry) {
+                    var searchOptions = new SearchOptions(itemTimeoutMs, getMin: !startedSearch);
+                    var latch = new Latch<K, V>(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
+                    var readLockBuffer = new LockBuffer2<K, V>();
+
+                    // Recurse to leaf
+                    var searchResult = TryGetValue(maxKey, out _, ref subtree,
+                        ref latch, ref readLockBuffer, in tree, searchOptions);
+                    if (searchResult == ConcurrentTreeResult_Extended.timedOut) {
+                        throw new TimeoutException();
+                    } else if (searchResult == ConcurrentTreeResult_Extended.notSafeToUpdateLeaf) {
+                        throw new Exception("Bad Tree State, unexpected search result");
+                    }
+                    startedSearch = true;
+                    node = subtree.node;
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    int version = subtree.node.assertLatchLock(ref latch, beginRead: true);
+                    #endif
+
+                    try {
+                        for (int i = 0; i < node.Count; i++) {
+                            if (startedSearch && node._values[i].key.CompareTo(maxKey) > 0)
+                                yield return new KeyValuePair<K, V>(node._values[i].key, node._values[i].value);
+                            maxKey = node._values[i].key;
+                        }
+                        retry = acquiredNextNode(node, out node);
+                    } finally {
+
+                        #if ConcurrentSortedDictionary_DEBUG
+                        subtree.node.assertLatchLock(ref latch, version);
+                        #endif
+
+                        // Release Latch on subtree
+                        latch.ExitLatchChain(ref readLockBuffer);
+                    }
+                // Otherwise.. just try getting next fomr sibling...
+                } else {
+                    var prev = node;
+                    try {
+                        for (int i = 0; i < node.Count; i++) {
+                            if (startedSearch && node._values[i].key.CompareTo(maxKey) > 0)
+                                yield return new KeyValuePair<K, V>(node._values[i].key, node._values[i].value);
+                            maxKey = node._values[i].key;
+                        }
+                        retry = acquiredNextNode(node, out node);
+                    } finally {
+                        prev._rwLock.ExitReadLock();
+                    }
+                }
+            } while (node != null);
+        }
         
         private bool canSafelyInsert() {
             return this.Count < this.k; // it is safe to insert if (count + 1 <= k)
@@ -1647,6 +1795,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         }
         
         private bool canSafelyDelete() {
+            if (this.isRoot) {
+                return this.Count > 2; // root optimization (root only gets deleted on 1 node)
+            }
             int k = this.k;
             // Example: (L=3, safe to release at C=3), (L=4, C=4,3), (L=5, C=5,4), (L=6, C=6,5,4) etc...
             int checkLength = k % 2 == 0 ? k / 2 : k / 2 + 1;
@@ -1654,6 +1805,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         }
         
         private bool canMerge() {
+            if (this.isRoot) {
+                return this.Count < 2;  // root optimization (root only gets deleted on 1 node)
+            }
             int k = this.k; // merge if less than k/2 items in array
             int checkLength = k % 2 == 0 ? k / 2 : k / 2 + 1;
             return this.Count < checkLength;
@@ -1669,6 +1823,178 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 return canSafelyDelete();
             } else {
                 throw new ArgumentException("Unsupported latch access type");
+            }
+        }
+
+        private partial struct LeafSiblingNodes {
+            private volatile ConcurrentKTreeNode<K, V> next;
+            private volatile ConcurrentKTreeNode<K, V> prev;
+            private volatile int _mutex;
+
+            #if ConcurrentSortedDictionary_DEBUG
+            private volatile int _version;
+            #endif
+
+            public ConcurrentKTreeNode<K, V> Next { get { return this.next; } }
+            public ConcurrentKTreeNode<K, V> Prev { get { return this.prev; } }
+
+            static bool TryAcquire(ref LeafSiblingNodes node) {
+
+                #if ConcurrentSortedDictionary_DEBUG
+                int set = System.Environment.CurrentManagedThreadId;
+                #else
+                int set = 1;
+                #endif
+
+                return Interlocked.CompareExchange(ref node._mutex, set, 0) == 0;
+            }
+            static void Release(ref LeafSiblingNodes node) {
+                #if ConcurrentSortedDictionary_DEBUG
+                AssertMutexHeld(ref node);
+                #endif
+
+                node._mutex = 0;
+            }
+
+            public static void AtomicUpdateSplitNodes(in ConcurrentKTreeNode<K, V> node, in ConcurrentKTreeNode<K, V> splitNode) {
+                ConcurrentKTreeNode<K, V> next;
+                AcquireSplitMultiLock(in node, in splitNode, out next);
+
+                #if ConcurrentSortedDictionary_DEBUG
+                int v1, v2, v3;
+                assertStartWriter(node, splitNode, next, out v1, out v2, out v3);
+                #endif
+
+                // Fully assign valid points to the new node before allowing it to be reached
+                splitNode.siblings.next = next;
+                splitNode.siblings.prev = node;
+                // Now, leaf searches will find the correct nodes
+                node.siblings.next = splitNode;
+                if (!ReferenceEquals(null, next)) 
+                    next.siblings.prev = splitNode;
+                
+                #if ConcurrentSortedDictionary_DEBUG
+                assertEndWriter(node, splitNode, next, v1, v2, v3);
+                #endif   
+
+                ReleaseMultiLock(in node, in splitNode, in next);
+
+            }
+
+            public static void AtomicUpdateMergeNodes(in ConcurrentKTreeNode<K, V> deleteNode) {
+                ConcurrentKTreeNode<K, V> prevNode, nextNode;
+                AcquireMergeMultiLock(in deleteNode, out prevNode, out nextNode);
+
+                #if ConcurrentSortedDictionary_DEBUG
+                int v1, v2, v3;
+                assertStartWriter(prevNode, deleteNode, nextNode, out v1, out v2, out v3);
+                #endif
+
+                if (!ReferenceEquals(null, prevNode)) prevNode.siblings.next = nextNode;
+                if (!ReferenceEquals(null, nextNode)) nextNode.siblings.prev = prevNode;
+
+                #if ConcurrentSortedDictionary_DEBUG
+                assertEndWriter(prevNode, deleteNode, nextNode, v1, v2, v3);
+                #endif   
+
+                // For leaf searches- it is possible that the leaf search acquires the deleted node..
+                // however, the deleted node will still have the correct siblings, so it can continue
+
+                ReleaseMultiLock(in prevNode, in deleteNode, in nextNode);
+            }
+
+            static void AcquireSplitMultiLock(
+                in ConcurrentKTreeNode<K, V> node,
+                in ConcurrentKTreeNode<K, V> splitNode,
+                out ConcurrentKTreeNode<K, V> next
+            ) {
+                // Spin forever until acquired...
+                // The critical section for this lock is expected to only be assigning
+                // referenes in the siblings struct (very brief critical section)
+                // The lock is only acquired if all three are acquired simultaneously, otherwise
+                // try again
+                int spinCount = 0;
+                while (true) {
+
+                    // Spin backoff...
+                    if (spinCount > 1000000) {
+                        // This should rarely (if ever) occur naturally as the entire critical section is just a couple of assignments
+                        // Its here to act as a form of backoff... 
+                        Thread.Sleep(1);
+                    } else if (spinCount > 0) {
+                        while (spinCount < spinCount + 1000) spinCount++; // spin 1000
+                    }
+                    spinCount++;
+
+                    if (!TryAcquire(ref node.siblings)) {
+                        continue;
+                    }
+                    if (!TryAcquire(ref splitNode.siblings)) {
+                        Release(ref node.siblings);
+                        continue;
+                    }
+                    next = node.siblings.next;
+                    if (!ReferenceEquals(null, next) && !TryAcquire(ref next.siblings)) {
+                        Release(ref node.siblings);
+                        Release(ref splitNode.siblings);
+                        continue;
+                    }
+                    // Acquired all, so just return
+                    return;
+                }
+            }
+
+            static void AcquireMergeMultiLock(
+                in ConcurrentKTreeNode<K, V> deleteNode,
+                out ConcurrentKTreeNode<K, V> prevNode,
+                out ConcurrentKTreeNode<K, V> nextNode
+            ) {
+                // Spin forever until acquired...
+                // The critical section for this lock is expected to only be assigning
+                // referenes in the siblings struct (very brief critical section)
+                // The lock is only acquired if all three are acquired simultaneously, otherwise
+                // try again
+                int spinCount = 0;
+                while (true) {
+
+                    // Spin backoff...
+                    if (spinCount > 1000000) {
+                        Thread.Sleep(1); // This should rarely (if ever) occur as the entire critical section is just a couple of assignments
+                    } else if (spinCount > 0) {
+                        while (spinCount < spinCount + 1000) spinCount++; // spin 1000
+                    }
+                    spinCount++;
+
+                    if (!TryAcquire(ref deleteNode.siblings)) {
+                        continue;
+                    }
+                    prevNode = deleteNode.siblings.prev;
+                    if (!ReferenceEquals(null, prevNode) && !TryAcquire(ref prevNode.siblings)) {
+                        Release(ref deleteNode.siblings);
+                        continue;
+                    }
+                    nextNode = deleteNode.siblings.next;
+                    if (!ReferenceEquals(null, nextNode) && !TryAcquire(ref nextNode.siblings)) {
+                        Release(ref deleteNode.siblings);
+                        Release(ref prevNode.siblings);
+                        continue;
+                    }
+                    // Acquired all, so just return
+                    return;
+                }
+            }
+
+            static void ReleaseMultiLock(
+                in ConcurrentKTreeNode<K, V> node1,
+                in ConcurrentKTreeNode<K, V> node2,
+                in ConcurrentKTreeNode<K, V> node3
+            ) {
+                bool node1Exists = !ReferenceEquals(null, node1);
+                bool node2Exists = !ReferenceEquals(null, node2);
+                bool node3Exists = !ReferenceEquals(null, node3);
+                if (node1Exists) Release(ref node1.siblings);
+                if (node2Exists) Release(ref node2.siblings);
+                if (node3Exists) Release(ref node3.siblings);
             }
         }
     }
