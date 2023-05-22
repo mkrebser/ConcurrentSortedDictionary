@@ -485,7 +485,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
     }
 
     public IEnumerator<KeyValuePair<Key, Value>> GetEnumerator(int itemTimeoutMs = -1, int subTreeDepth = 2) {
-        return ConcurrentKTreeNode<Key, Value>.AllItems(this, subTreeDepth, itemTimeoutMs).GetEnumerator();
+        return ConcurrentKTreeNode<Key, Value>.AllItems(this, itemTimeoutMs).GetEnumerator();
     }
 
     IEnumerator IEnumerable.GetEnumerator() {
@@ -1351,7 +1351,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <summary>
         /// Remove index from array and shift left starting at removed index
         /// </summary>
-        
         private void deleteIndex<VType>(
             in int index,
             in NodeData<K, VType>[] array
@@ -1441,8 +1440,8 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
 
             for (int depth = 0; depth < options.maxDepth; depth++) {
                 if (info.node.isLeaf) {
-                    int compareResult;
-                    info.index = info.node.searchRangeIndex(key, info.node._values, out compareResult);
+                    int compareResult = 0;
+                    info.index = options.getMin ? 0 : info.node.searchRangeIndex(key, info.node._values, out compareResult);
                     info.depth = depth;
                     var searchResult = ConcurrentTreeResult_Extended.success;
                     if (compareResult == 0) {
@@ -1513,57 +1512,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         }
 
         /// <summary>
-        /// read lock entire tree under this node and return key-values in order
-        /// </summary>
-        /// <param name="largerThan"> only return a pair if its key is larger than this </param>
-        /// <param name="doLargerThanCheck"> do larger than comparison? </param>
-        /// <param name="itemTimeoutMs"> how long to wait before timeout on each node </param>
-        private IEnumerable<KeyValuePair<K, V>> recurseTree(
-            K largerThan = default(K),
-            bool doLargerThanCheck = false,
-            int itemTimeoutMs = -1
-        ) {
-            #if ConcurrentSortedDictionary_DEBUG
-            int version = -1;
-            #endif
-
-            bool enteredMutex = false;
-            try {
-                if (!this._rwLock.TryEnterReadLock(itemTimeoutMs)) {
-                    throw new TimeoutException();
-                }
-                enteredMutex = true;
-
-                #if ConcurrentSortedDictionary_DEBUG
-                version = assertReadLock(beginRead: true);
-                #endif
-
-                if (this.isLeaf) {
-                    for (int i = 0; i < this.Count; i++) {
-                        if (!doLargerThanCheck || largerThan.CompareTo(this._values[i].key) < 0)
-                            yield return new KeyValuePair<K, V>(this._values[i].key, this._values[i].value);
-                    }
-                } else {
-                    for (int i = 0; i < this.Count; i++) {
-                        var nextNode = this._children[i].value;
-                        foreach (var pair in nextNode.recurseTree(largerThan, doLargerThanCheck, itemTimeoutMs)) {
-                            yield return pair;
-                        }
-                    }
-                }
-            } finally {
-                if (enteredMutex) {
-
-                    #if ConcurrentSortedDictionary_DEBUG
-                    assertReadLock(version);
-                    #endif
-
-                    this._rwLock.ExitReadLock();
-                }
-            }
-        }
-
-        /// <summary>
         /// Get all items starting from this node. This method will not read lock the entire tree.
         /// It will instead lock subtrees as it iterates through the entire tree.
         /// </summary>
@@ -1572,131 +1520,19 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <param name="itemTimeoutMs"> key of the item to be inserted </param>
         public static IEnumerable<KeyValuePair<K, V>> AllItems(
             ConcurrentSortedDictionary<Key, Value> tree,
-            int subTreeDepth = 2,
-            int itemTimeoutMs = -1
-        ) {
-            // General idea of this iterator:
-            // it will search for all subtrees and return their items until done
-            // searching for subtrees N times is preferred because it avoids read-locking the root
-            // for the entire duration of the iterator
-            //
-            // foreach (subtree in tree.recurseToNextSubtree())
-            //     yield return subtree.items()
-
-            // init. Note* we are not passing the latch in by ref because enumerable doesn't allow it
-            //       however, there isn't a difference if we just create it in read mode using the same root
-
-            SearchResultInfo<K, V> subtree = default(SearchResultInfo<K, V>);
-            V _ = default(V);
-            K maxKey = default(K);
-            bool doLargerThanCheck = false;
-            int maxDepth = Math.Max(0, tree.Depth - subTreeDepth);
-            var searchOptions = new SearchOptions(itemTimeoutMs, maxDepth, true);
-            var latch = new Latch<K, V>(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
-            var readLockBuffer = new LockBuffer2<K, V>();
-            // flag for checking if the final subtree has been returned
-            bool searchFinalSubtree = false;
-
-            // Get Min subtree (eg starting point)
-            var searchResult = TryGetValue(subtree.nextSubTreeKey, out _, ref subtree,
-                ref latch, ref readLockBuffer, in tree, searchOptions);
-            if (searchResult == ConcurrentTreeResult_Extended.timedOut) {
-                throw new TimeoutException();
-            } else if (searchResult == ConcurrentTreeResult_Extended.notSafeToUpdateLeaf) {
-                throw new Exception("Bad Tree State, unexpected search result");
-            }
-
-            do {
-
-                #if ConcurrentSortedDictionary_DEBUG
-                int version = subtree.node.assertLatchLock(ref latch, beginRead: true);
-                #endif
-
-                // Iterate all in current locked tree
-                try {
-                    if (subtree.node.isLeaf) { // subtree is leaf
-                        for (int i = 0; i < subtree.node.Count; i++) {
-                            yield return new KeyValuePair<K, V>(subtree.node._values[i].key,
-                                subtree.node._values[i].value);
-                        }
-                        // If leaf node is also the root...
-                        if (subtree.node.isRoot) {
-                            yield break;
-                        }
-                    } else {
-                        // If not at a leaf... then recurse on the subtree
-                        for (int i = 0; i < subtree.node.Count; i++) {
-                            // We already locked the subtree node.. So recurse on each child
-                            // to avoid recursive locking of the same lock
-                            var childNode = subtree.node._children[i].value;
-                            foreach (var pair in childNode.recurseTree(maxKey, doLargerThanCheck, itemTimeoutMs)) {
-                                maxKey = pair.Key;
-                                yield return pair;
-                            }
-                        }
-                    }
-                } finally {
-
-                    #if ConcurrentSortedDictionary_DEBUG
-                    subtree.node.assertLatchLock(ref latch, version);
-                    #endif
-
-                    // Release Latch on subtree
-                    latch.ExitLatchChain(ref readLockBuffer);
-                }
-
-                // No need to search again.. this was the final node... just exit
-                if (searchFinalSubtree) {
-                    yield break;
-                }
-
-                // Get next tree
-                searchOptions = new SearchOptions(itemTimeoutMs, maxDepth, false);
-                latch = new Latch<K, V>(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
-                readLockBuffer = new LockBuffer2<K, V>();
-                K nextKey = subtree.nextSubTreeKey; // Note* make copy due to pass-by-reference
-                searchResult = TryGetValue(
-                    nextKey, out _, ref subtree, ref latch, ref readLockBuffer, in tree, searchOptions);
-                // If failed due to timout.. or there is no next key
-                if (!subtree.hasNextSubTree) {
-                    // If the final node was already searched....
-                    if (searchFinalSubtree) {
-                        latch.ExitLatchChain(ref readLockBuffer);
-                        yield break;
-                    } else { // otherwise.. set flag and do one more pass
-                        searchFinalSubtree = true;
-                    }
-                } else if (searchResult == ConcurrentTreeResult_Extended.timedOut) {
-                    throw new TimeoutException();
-                } else if (searchResult == ConcurrentTreeResult_Extended.notSafeToUpdateLeaf) {
-                    throw new Exception("Bad Tree State, unexpected search result");
-                }
-                doLargerThanCheck = true;
-            } while (true);
-        }
-
-
-        /// <summary>
-        /// Get all items starting from this node. This method will not read lock the entire tree.
-        /// It will instead lock subtrees as it iterates through the entire tree.
-        /// </summary>
-        /// <param name="tree"> tree reference </param>
-        /// <param name="subTreeDepth"> depth subtrees which get read locked. (eg 1=k values locked, 2=k^2 locked, 3=k^3 locked), etc.. </param>
-        /// <param name="itemTimeoutMs"> key of the item to be inserted </param>
-        public static IEnumerable<KeyValuePair<K, V>> AllItems2(
-            ConcurrentSortedDictionary<Key, Value> tree,
             int itemTimeoutMs = -1
         ) {
             bool acquiredNextNode(ConcurrentKTreeNode<K, V> node, out ConcurrentKTreeNode<K, V> next) {
                 // Now get the next node
                 next = node.siblings.Next;
-                if (!ReferenceEquals(null, next)) {
-                    // Try to acquire read lock... (dont wait at all if lock is held by writer.. just quit)
-                    if (!next._rwLock.TryEnterReadLock(0)) {
-                        return false;
-                    }
+                if (ReferenceEquals(null, next)) {
+                    return false;
                 }
-                return true;
+                // Try to acquire read lock... (dont wait at all if lock is held by writer.. just quit)
+                if (!next._rwLock.TryEnterReadLock(0)) {
+                    return true; // failed to acquire- need to retry search
+                }
+                return false; // acquired, don't need to retry search
             }
 
             ConcurrentKTreeNode<K, V> node = null;
@@ -1729,9 +1565,12 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
 
                     try {
                         for (int i = 0; i < node.Count; i++) {
-                            if (startedSearch && node._values[i].key.CompareTo(maxKey) > 0)
-                                yield return new KeyValuePair<K, V>(node._values[i].key, node._values[i].value);
-                            maxKey = node._values[i].key;
+                            var pair = new KeyValuePair<K, V>(node._values[i].key, node._values[i].value);
+                            if (!startedSearch || pair.Key.CompareTo(maxKey) > 0) {
+                                yield return pair;
+                                startedSearch = true;
+                                maxKey = pair.Key;
+                            }
                         }
                         retry = acquiredNextNode(node, out node);
                     } finally {
@@ -1743,14 +1582,17 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                         // Release Latch on subtree
                         latch.ExitLatchChain(ref readLockBuffer);
                     }
-                // Otherwise.. just try getting next fomr sibling...
+                // Otherwise.. just try getting next from sibling...
                 } else {
                     var prev = node;
                     try {
                         for (int i = 0; i < node.Count; i++) {
-                            if (startedSearch && node._values[i].key.CompareTo(maxKey) > 0)
-                                yield return new KeyValuePair<K, V>(node._values[i].key, node._values[i].value);
-                            maxKey = node._values[i].key;
+                            var pair = new KeyValuePair<K, V>(node._values[i].key, node._values[i].value);
+                            if (!startedSearch || pair.Key.CompareTo(maxKey) > 0) {
+                                yield return pair;
+                                startedSearch = true;
+                                maxKey = pair.Key;
+                            }
                         }
                         retry = acquiredNextNode(node, out node);
                     } finally {

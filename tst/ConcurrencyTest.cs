@@ -14,9 +14,6 @@ public class ConcurrencyTest {
             var tree = new ConcurrentSortedDictionary<K, V>(k);
             var rand = new Random(k * pairs.Count/2);
             var start = DateTimeOffset.Now.ToUnixTimeMilliseconds();
-            long opCount = 0;
-
-            long timeOfLastPing = 0;
 
             int index = 0;
 
@@ -35,6 +32,9 @@ public class ConcurrencyTest {
                 }
 
                 var t = new Thread(() => {
+
+                    long opCount = 0;
+                    long timeOfLastPing = 0;
 
                     foreach (var p in newList) {
                         if (sanity.ContainsKey(p.Item1))
@@ -97,9 +97,6 @@ public class ConcurrencyTest {
             var tree = new ConcurrentSortedDictionary<K, V>(k);
             var rand = new Random(k * pairs.Count/2);
             var start = DateTimeOffset.Now.ToUnixTimeMilliseconds();
-            long opCount = 0;
-
-            long timeOfLastPing = 0;
 
             int index = 0;
 
@@ -116,6 +113,9 @@ public class ConcurrencyTest {
                 }
 
                 var t = new Thread(() => {
+
+                    long opCount = 0;
+                    long timeOfLastPing = 0;
 
                     foreach (var p in newList) {
                         if (sanity.ContainsKey(p.Item1))
@@ -175,9 +175,6 @@ public class ConcurrencyTest {
             var tree = new ConcurrentSortedDictionary<K, V>(k);
             var rand = new Random(k * pairs.Count/2);
             var start = DateTimeOffset.Now.ToUnixTimeMilliseconds();
-            long opCount = 0;
-
-            long timeOfLastPing = 0;
 
             int index = 0;
 
@@ -194,6 +191,9 @@ public class ConcurrencyTest {
                 }
 
                 var t = new Thread(() => {
+
+                    long opCount = 0;
+                    long timeOfLastPing = 0;
 
                     foreach (var p in newList) {
                         if (sanity.ContainsKey(p.Item1))
@@ -264,6 +264,9 @@ public class ConcurrencyTest {
     }
 
     public void run() {
+        //TODO: Deadlock test
+        // iterator + reversed it test
+        //concurrent dict parity test
         {
             //ConcurrentSortedDictionary<int, int>.LockTest(ms: 60000);
         }
