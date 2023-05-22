@@ -276,7 +276,7 @@ public class ConcurrencyTest {
             var intint_pairs = intrange
                 .Select(x => new ValueTuple<int, int>(x, -x))
                 .ToList();
-            intint.rand_add_remove_cycle_test(32, intint_pairs, ms: 60000);
+            intint.rand_add_remove_cycle_test(32, intint_pairs, ms: 120000);
         }
         // small tree test
         {

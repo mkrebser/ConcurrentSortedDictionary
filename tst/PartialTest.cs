@@ -31,6 +31,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
         Test.Assert(this._root.isLeaf || this._root.Count > 1); // can only have 1 child in leaf case
     }
 
+    public void AssertTreeRoot(int numItems) {
+        Test.Assert(this._root.isLeaf || this._root.Count > 1); // can only have 1 child in leaf case
+        Test.Assert(this.Count == numItems);
+    }
+
     private partial class ConcurrentKTreeNode<K, V> where K: IComparable<K> {
 
         public static void LockTest(int ms = 60000) {

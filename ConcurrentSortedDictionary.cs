@@ -1274,89 +1274,63 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 return;
             }
 
-            int nodeIndex = this.Parent.indexOfNode(this);
+            #if ConcurrentSortedDictionary_DEBUG
+            parent.assertWriterLockHeld();
+            #endif
+
+            int nodeIndex = parent.indexOfNode(this);
             int leftIndex = nodeIndex - 1;
             int rightIndex = nodeIndex + 1;
-            var left = nodeIndex > 0 ? this.Parent._children[leftIndex].value : null;
-            var right = nodeIndex < this.Parent.Count - 1 ? this.Parent._children[rightIndex].value : null;
+            var left = nodeIndex > 0 ? parent._children[leftIndex].value : null;
+            var right = nodeIndex < parent.Count - 1 ? parent._children[rightIndex].value : null;
 
-            // (very) Rare race condition check on internal nodes!
-            // TODO get occurences, but should be less then 1 times per billion ops
-            if (!isLeaf) {
-                if (!ReferenceEquals(null, left)) {
-                    int spinCount = 0;
-                    while (left._rwLock.IsWriteLockHeld) {
-                        if (spinCount > 1000000) { Thread.Sleep(1); }
-                        for (int i = 0; i < 100; i++) { spinCount++; } // spin
-                    }
-                }
-                if (!ReferenceEquals(null, right)) {
-                    int spinCount = 0;
-                    while (right._rwLock.IsWriteLockHeld) {
-                        if (spinCount > 1000000) { Thread.Sleep(1); }
-                        for (int i = 0; i < 100; i++) { spinCount++; } // spin
-                    }
-                }
-            }
+            try {
+                // Always write lock on nodes- this is due to the leaf iterator!
+                // To safely iterate side-to-side, all leaf nodes that are being modified need to be write locked
+                // Deadlock is guarenteed to not occur here because we hold a write-lock on the parent of this node!
+                // Or for internal nodes, there are cases where subsequent in-progress writes will have race conditions if not locked
+                if (!ReferenceEquals(null, left)) left._rwLock.EnterWriteLock();
+                if (!ReferenceEquals(null, right)) right._rwLock.EnterWriteLock();
 
-            // 3. Try to Adopt from left
-            if (!ReferenceEquals(null, left) && left.canSafelyDelete()) {
-                try {
-                    // Always write lock on leaf nodes- this is due to the leaf iterator!
-                    // To safely iterate side-to-side, all leaf nodes that are being modified need to be write locked
-                    // Deadlock is guarenteed to not occur here because we hold a write-lock on the parent of this node!
-                    if (left.isLeaf) left._rwLock.EnterWriteLock(); 
+                // 3. Try to Adopt from left
+                if (!ReferenceEquals(null, left) && left.canSafelyDelete()) {
                     adoptLeft(in left, this, in leftIndex, in nodeIndex);
-                } finally {
-                    if (left.isLeaf) left._rwLock.ExitWriteLock();
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    assertWriterLock(version);
+                    #endif
+
+                    return;
                 }
-
-                #if ConcurrentSortedDictionary_DEBUG
-                assertWriterLock(version);
-                #endif
-
-                return;
-            }
-            // 4. Try to Adopt from right
-            if (!ReferenceEquals(null, right) && right.canSafelyDelete()) {
-
-                try {
-                    if (right.isLeaf) right._rwLock.EnterWriteLock();
+                // 4. Try to Adopt from right
+                if (!ReferenceEquals(null, right) && right.canSafelyDelete()) {
                     adoptRight(this, in right, in nodeIndex, in rightIndex);
-                } finally {
-                    if (right.isLeaf) right._rwLock.ExitWriteLock();
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    assertWriterLock(version);
+                    #endif
+
+                    return;
                 }
-
-                #if ConcurrentSortedDictionary_DEBUG
-                assertWriterLock(version);
-                #endif
-
-                return;
-            }
-            // 5a. Merge Right if possible
-            if (!ReferenceEquals(null, right)) {
-                try {
-                    if (right.isLeaf) right._rwLock.EnterWriteLock(); 
+                // 5a. Merge Right if possible
+                if (!ReferenceEquals(null, right)) {
                     mergeRight(this, in right, in nodeIndex, in rightIndex);
                     if (right.isLeaf) LeafSiblingNodes.AtomicUpdateMergeNodes(in right);
-                } finally {
-                    if (right.isLeaf) right._rwLock.ExitWriteLock();
                 }
-            }
-            // 5b. Otherwise Merge left
-            else {
-                try {
-                    if (left.isLeaf) left._rwLock.EnterWriteLock();
+                // 5b. Otherwise Merge left
+                else {
                     mergeLeft(in left, this, in leftIndex, in nodeIndex);
                     if (left.isLeaf) LeafSiblingNodes.AtomicUpdateMergeNodes(in left);
-                } finally {
-                    if (left.isLeaf) left._rwLock.ExitWriteLock();
                 }
-            }
 
-            #if ConcurrentSortedDictionary_DEBUG
-            assertWriterLock(version);
-            #endif
+                #if ConcurrentSortedDictionary_DEBUG
+                assertWriterLock(version);
+                #endif
+
+            } finally {
+                if (!ReferenceEquals(null, left)) left._rwLock.ExitWriteLock();
+                if (!ReferenceEquals(null, right)) right._rwLock.ExitWriteLock();
+            }
 
             // 6. Try to merge recurse on parent
             parent.tryMerge(in tree);

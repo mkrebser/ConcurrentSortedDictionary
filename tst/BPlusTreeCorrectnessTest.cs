@@ -87,6 +87,7 @@ public class BPlusTreeCorrectnessTest {
             int count = 0;
             foreach (var pair in pairs) {
                 Test.Assert(tree.TryRemove(pair.Item1));
+                tree.AssertTreeRoot(pairs.Count - (count+1));
                 if (alwaysAssertTreeState || count <= 0 || count >= pairs.Count - 1 || count == pairs.Count / 2) {
                     tree.AssertTreeState(pairs.Count - (count+1));
                 }
@@ -123,6 +124,21 @@ public class BPlusTreeCorrectnessTest {
             addAllToTree(pairs, tree, alwaysAssertTreeState);
             tree.Clear();
             tree.AssertTreeState(0);
+        }
+
+        public void rand_add_removeall_test(int k, List<ValueTuple<K, V>> pairs, int ops = 1000000, bool alwaysAssertTreeState = false) {
+            int opCount = 0;
+            var rand = new Random(k * pairs.Count);
+            var tree = new ConcurrentSortedDictionary<K, V>(k);
+            while (opCount < ops) {
+                var randPairs = pairs.OrderBy(pair => rand.Next()).ToList();
+                addAllToTree(randPairs, tree, alwaysAssertTreeState);
+                removeAllFromTree(randPairs, tree, alwaysAssertTreeState);
+                opCount += randPairs.Count * 2;
+                if (opCount % 1000000 == 0) {
+                    Console.WriteLine(".");
+                }
+            }
         }
 
         public void rand_add_remove_test(int k, List<ValueTuple<K, V>> pairs, int ops = 1000000, bool alwaysAssertTreeState = false) {
@@ -202,6 +218,10 @@ public class BPlusTreeCorrectnessTest {
         tentest.rand_add_remove_test(3, Enumerable.Range(1, 18)
             .Select(x => new ValueTuple<int, int>(x, -x))
             .ToList(), alwaysAssertTreeState: true);
+
+        tentest.rand_add_removeall_test(32, Enumerable.Range(1, 640)
+            .Select(x => new ValueTuple<int, int>(x, -x))
+            .ToList(), 10000000, false);
 
 
         List<Thread> threads = new List<Thread>();
