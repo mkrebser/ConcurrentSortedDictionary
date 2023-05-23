@@ -92,7 +92,8 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
         public void assertStateAndCount(int depth, ref int itemCount, ref int minLeafDepth, ref int maxLeafDepth,
             HashSet<K> allKeysSet, List<K> depthFirstKeys, ref K prev, ref bool setPrev, ref ConcurrentKTreeNode<K, V> prevNode, ref ConcurrentKTreeNode<K, V> nextNode
         ) {
-            if (!this.isRoot) Test.Assert(!this.canSplit() && !this.canMerge()); // all nodes should have appriate number of children (between k/2 and k-1)
+            bool isRoot = depth == 0;
+            if (!isRoot) Test.Assert(!this.canSplit() && !this.canMerge(isRoot)); // all nodes should have appriate number of children (between k/2 and k-1)
             else Test.Assert(!this.canSplit());
 
             Test.Assert(this._rwLock.IsReadLockHeld == false && this._rwLock.IsWriteLockHeld == false && this._rwLock.IsUpgradeableReadLockHeld == false);
@@ -110,7 +111,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
                 for (int i = 0; i < this.Count; i++) {
                     this._children[i].value.assertStateAndCount(depth + 1, ref itemCount, ref minLeafDepth, ref maxLeafDepth, allKeysSet,
                         depthFirstKeys, ref prev, ref setPrev, ref prevNode, ref nextNode);
-                    Test.Assert(ReferenceEquals(this._children[i].value.Parent, this)); // assert correct parents
                     Test.Assert(i == 0 || this._children[i].value.MinTestKey.CompareTo(this._children[i].key) >= 0);
                 }
             }
@@ -179,11 +179,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
                 int listLength = 10;
                 int minLength = 3;
                 Test.Assert(listLength > minLength);
-                ConcurrentKTreeNode<K, V> init_node = new ConcurrentKTreeNode<K, V>(3, null, true);
+                ConcurrentKTreeNode<K, V> init_node = new ConcurrentKTreeNode<K, V>(3, true);
                 {
                     var next = init_node;
                     for (int i = 0; i < listLength; i++) {
-                        var newNode = new ConcurrentKTreeNode<K, V>(3, null, true);
+                        var newNode = new ConcurrentKTreeNode<K, V>(3, true);
                         next.siblings.next = newNode;
                         newNode.siblings.prev = next;
                         next = newNode;
@@ -212,7 +212,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
                                 if (node == null) continue;
 
                                 // Try adding a new node
-                                var newNode = new ConcurrentKTreeNode<K, V>(3, null, true);
+                                var newNode = new ConcurrentKTreeNode<K, V>(3, true);
                                 AtomicUpdateSplitNodes(in node, in newNode);
                             }
 

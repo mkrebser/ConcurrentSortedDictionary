@@ -268,7 +268,7 @@ public class ConcurrencyTest {
         // iterator + reversed it test
         //concurrent dict parity test
         {
-            //ConcurrentSortedDictionary<int, int>.LockTest(ms: 60000);
+            ConcurrentSortedDictionary<int, int>.LockTest(ms: 60000);
         }
         // small tree cycle test
         {

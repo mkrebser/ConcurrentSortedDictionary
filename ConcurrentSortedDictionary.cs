@@ -299,14 +299,24 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
 
                 if (rwLatch.isInsertAccess) {
                     tryUpdateDepth(info.depth);
-                    return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue, exitOnTest);
+                    return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue,
+                        exitOnTest, ref rwLockBuffer, ref rwLatch);
                 } else {
                     retrievedValue = default(Value);
-                    return writeDeletion(in key, in info, in getResult, exitOnTest);
+                    return writeDeletion(in key, in info, in getResult, exitOnTest, ref rwLockBuffer, ref rwLatch);
                 }
+            } else {
+                rwLatch.ExitLatchChain(ref rwLockBuffer);
+                #if ConcurrentSortedDictionary_DEBUG
+                Test.Assert(!rwLatch.HoldingRootLock);
+                Test.Assert(ReferenceEquals(null, rwLockBuffer.peek()));
+                #endif
             }
         } finally {
-            rwLatch.ExitLatchChain(ref rwLockBuffer);
+            #if ConcurrentSortedDictionary_DEBUG
+            Test.Assert(rwLockBuffer.peek() == null);
+            Test.Assert(!rwLatch.HoldingRootLock);
+            #endif
         }
 
         // Otherwise, try to acquire write access using a full write latch chain
@@ -333,51 +343,80 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
 
             if (writeLatch.isInsertAccess) {
                 tryUpdateDepth(info.depth);
-                return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue, false);
+                return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue,
+                    false, ref writeLockBuffer, ref writeLatch);
             } else {
                 retrievedValue = default(Value);
-                return writeDeletion(in key, in info, in getResult, false);
+                return writeDeletion(in key, in info, in getResult, false, ref writeLockBuffer, ref writeLatch);
             }
         } finally {
-            writeLatch.ExitLatchChain(ref writeLockBuffer);
+            #if ConcurrentSortedDictionary_DEBUG
+            Test.Assert(writeLockBuffer.peek() == null);
+            Test.Assert(!writeLatch.HoldingRootLock);
+            #endif
         }
     }
 
-    private ConcurrentTreeResult_Extended writeInsertion(
+    private ConcurrentTreeResult_Extended writeInsertion<LockBuffer>(
         in Key key,
         in Value value,
         in SearchResultInfo<Key, Value> info,
         in ConcurrentTreeResult_Extended getResult,
         in bool overwrite,
         out Value retrievedValue,
-        in bool exitOnTest // if exitOnTest is true, then this function should never perform a write
-    ) {
+        in bool exitOnTest, // if exitOnTest is true, then this function should never perform a write
+        ref LockBuffer lockBuffer,
+        ref Latch<Key, Value> latch
+    ) where LockBuffer: ILockBuffer<Key, Value> {
         // If the vaue already exists...
         if (getResult == ConcurrentTreeResult_Extended.success || exitOnTest) {
             if (overwrite && !exitOnTest) {
                 info.node.SetValue(info.index, in key, in value);
                 retrievedValue = value;
+
+                latch.ExitLatchChain(ref lockBuffer);
+                #if ConcurrentSortedDictionary_DEBUG
+                Test.Assert(!latch.HoldingRootLock);
+                Test.Assert(ReferenceEquals(null, lockBuffer.peek()));
+                #endif
+
                 return ConcurrentTreeResult_Extended.success;
             }
             retrievedValue = info.node.GetValue(info.index).value;
+
+            latch.ExitLatchChain(ref lockBuffer);
+            #if ConcurrentSortedDictionary_DEBUG
+            Test.Assert(!latch.HoldingRootLock);
+            Test.Assert(ReferenceEquals(null, lockBuffer.peek()));
+            #endif
+
             return ConcurrentTreeResult_Extended.alreadyExists;
         }
-        info.node.sync_InsertAtThisNode(in key, in value, this);
+        info.node.sync_InsertAtThisNode(in key, in value, this, ref lockBuffer, ref latch);
+        // NOTE* tree is unlocked after sync_Insert
         Interlocked.Increment(ref this._count); // increase count
         retrievedValue = value;
         return ConcurrentTreeResult_Extended.success;
     }
 
-    private ConcurrentTreeResult_Extended writeDeletion(
+    private ConcurrentTreeResult_Extended writeDeletion<LockBuffer>(
         in Key key,
         in SearchResultInfo<Key, Value> info,
         in ConcurrentTreeResult_Extended getResult,
-        in bool exitOnTest // if exitOnTest is true, then this function should never perform a write
-    ) {
+        in bool exitOnTest, // if exitOnTest is true, then this function should never perform a write
+        ref LockBuffer lockBuffer,
+        ref Latch<Key, Value> latch
+    ) where LockBuffer: ILockBuffer<Key, Value> {
         if (getResult == ConcurrentTreeResult_Extended.notFound || exitOnTest) {
+            latch.ExitLatchChain(ref lockBuffer);
+            #if ConcurrentSortedDictionary_DEBUG
+            Test.Assert(!latch.HoldingRootLock);
+            Test.Assert(ReferenceEquals(null, lockBuffer.peek()));
+            #endif
             return ConcurrentTreeResult_Extended.notFound;
         }
-        info.node.sync_DeleteAtThisNode(in key, this);
+        info.node.sync_DeleteAtThisNode(in key, this, ref lockBuffer, ref latch);
+        // NOTE* tree is unlocked after sync_delete
         Interlocked.Decrement(ref this._count); // decrement count
         return ConcurrentTreeResult_Extended.success;
     }
@@ -508,7 +547,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         }
         try {
             // Make a new root...
-            var newRoot = new ConcurrentKTreeNode<Key, Value>(_root.k, parent: null, isLeaf: true);
+            var newRoot = new ConcurrentKTreeNode<Key, Value>(_root.k, isLeaf: true);
             this.setRoot(newRoot);
             this._count = 0;
             this._depth = 0;
@@ -586,12 +625,17 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         public ConcurrentKTreeNode<K, V> peek();
         public void push(in ConcurrentKTreeNode<K, V> node);
         public ConcurrentKTreeNode<K, V> pop();
+        public ConcurrentKTreeNode<K, V> peekParent();
     }
 
     private struct LockBuffer2<K, V> : ILockBuffer<K, V> where K: IComparable<K> {
         public ConcurrentKTreeNode<K, V> peek() {
             if (!ReferenceEquals(null, r1)) return r1;
             else return r0;
+        }
+        public ConcurrentKTreeNode<K, V> peekParent() {
+            if (!ReferenceEquals(null, r1)) return r0;
+            return null;
         }
         public void push(in ConcurrentKTreeNode<K, V> node) {
             if (ReferenceEquals(null, r0)) r0 = node;
@@ -625,6 +669,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             if (this.Count <= 0)
                 return null;
             return get(this.Count - 1);
+        }
+        public ConcurrentKTreeNode<K, V> peekParent() {
+            if (this.Count <= 1)
+                return null;
+            return get(this.Count - 2);
         }
         public int Count { get; private set; }
         public void push(in ConcurrentKTreeNode<K, V> node) {
@@ -723,6 +772,10 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             }
         }
 
+        #if ConcurrentSortedDictionary_DEBUG
+        public bool HoldingRootLock { get { return !ReferenceEquals(null, this._rootLock); } }
+        #endif
+
         /// <summary>
         /// Exit the latch at this level and every parent including the rootLock
         /// </summary>
@@ -741,10 +794,31 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             ExitRootLock();
         }
 
+        /// <summary>
+        /// Exit the latch at the node at the top of the stack
+        /// </summary>
+        public void PopLatch<LockBuffer>(ref LockBuffer lockBuffer) where LockBuffer : ILockBuffer<K, V> {
+            ConcurrentKTreeNode<K, V> node = lockBuffer.pop();
+            if (!ReferenceEquals(null, node)) {
+                if (this.isReadAccess ||
+                    (this.assumeLeafIsSafe && !node.isLeaf)
+                ) {
+                    node._rwLock.ExitReadLock();
+                } else {
+                    node._rwLock.ExitWriteLock();
+                }
+            }
+            // If there is nothing left in the buffer...
+            if (ReferenceEquals(null, lockBuffer.peek())) {
+                ExitRootLock();
+            }
+        }
+
         public LatchAccessResult TryEnterLatch<LockBuffer>(
             ref LockBuffer lockBuffer,
             in ConcurrentKTreeNode<K, V> node,
-            in int timeoutMs
+            in int timeoutMs,
+            bool isRoot
         ) where LockBuffer : ILockBuffer<K, V> {
             if (this.isReadAccess ||
                 (this.assumeLeafIsSafe && !node.isLeaf)
@@ -766,7 +840,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 }
 
                 // Check if it is safe to update node
-                if (node.NodeIsSafe(this.isInsertAccess, this.isDeleteAccess)) {
+                if (node.NodeIsSafe(this.isInsertAccess, this.isDeleteAccess, isRoot)) {
                     ExitLatchChain(ref lockBuffer); // Exit existing locks
                     lockBuffer.push(node); // push newly acquired lock to chain
                     return LatchAccessResult.acquired;
@@ -809,7 +883,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
     /// Tree Node with N children. Can be a leaf or an internal node.
     /// </summary>
     private partial class ConcurrentKTreeNode<K, V> where K: IComparable<K> {
-        public ConcurrentKTreeNode(int k, ConcurrentKTreeNode<K, V> parent = null, bool isLeaf = false) {
+        public ConcurrentKTreeNode(int k, bool isLeaf = false) {
             if (isLeaf) {
                 this._values = new NodeData<K, V>[k+1];
                 this._children = null;
@@ -819,12 +893,10 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             }
             this._rwLock = new ReaderWriterLockSlim(LockRecursionPolicy.NoRecursion);
             this._count = 0;
-            this._parent = parent;
         }
         private LeafSiblingNodes siblings;
         private NodeData<K, V>[] _values;
         private NodeData<K, ConcurrentKTreeNode<K, V>>[] _children;
-        private volatile ConcurrentKTreeNode<K, V> _parent;
         private volatile int _count;
         public ReaderWriterLockSlim _rwLock { get; private set; } // Each node has its own lock
 
@@ -838,10 +910,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
 
         public int k {
             get { return this.isLeaf ? this._values.Length - 1 : this._children.Length - 1; }
-        }
-
-        public bool isRoot {
-            get { return ReferenceEquals(null, this._parent); }
         }
 
         public void SetValue(in int index, in K key, in V value) {
@@ -860,33 +928,24 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 this._count = value;
             }
         }
-        /// <summary>
-        /// convience parent-ref
-        /// </summary>
-        public ConcurrentKTreeNode<K, V> Parent {
-            get {
-                return this._parent;
-            }
-            private set {
-                this._parent = value;
-            }
-        }
 
         /// <summary>
         /// Perform insert starting at leaf and recurse up.
         /// **WARNING**. This method assumes the calling thread has acquired all write locks needed
         /// for this write.
         /// </summary>
-        public void sync_InsertAtThisNode(
+        public void sync_InsertAtThisNode<LockBuffer>(
             in K key,
             in V value,
-            in ConcurrentSortedDictionary<K, V> tree
-        ) {
+            in ConcurrentSortedDictionary<K, V> tree,
+            ref LockBuffer lockBuffer,
+            ref Latch<K, V> latch
+        ) where LockBuffer: ILockBuffer<K, V> {
             if (!this.isLeaf) {
                 throw new Exception("Can only insert at leaf node");
             }
             this.orderedInsert(in key, in this._values, in value);
-            this.trySplit(in tree);
+            trySplit(in tree, ref lockBuffer, ref latch);
         }
 
         /// <summary>
@@ -991,7 +1050,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// The current node (this) will keep k/2 lowest children.
         /// The new node will have the same parent as this node.
         /// </summary>
-        private void trySplit(in ConcurrentSortedDictionary<K, V> tree) {
+        private static void trySplit<LockBuffer>(
+            in ConcurrentSortedDictionary<K, V> tree,
+            ref LockBuffer lockBuffer,
+            ref Latch<K, V> latch
+        ) where LockBuffer: ILockBuffer<K, V> {
             /// <summary>
             /// copy right half of array from -> to and zero-initialize copied indices in 'from'
             /// </summary>
@@ -1012,13 +1075,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     // set default key for new node
                     newNodeMinKey = from._children[half].key;
                     to._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(default(K), from._children[half].value);
-                    to._children[0].value.Parent = to;
                     from._children[half] = default(NodeData<K, ConcurrentKTreeNode<K, V>>); // default
                     // set the rest
                     for (int i = half + 1; i < arrLength; i++) {
                         to._children[i - half] = new NodeData<K, ConcurrentKTreeNode<K, V>>(
                             from._children[i].key, from._children[i].value);
-                        to._children[i - half].value.Parent = to; // copy parent ref
                         from._children[i] = default(NodeData<K, ConcurrentKTreeNode<K, V>>); // 0 init
                     }
                 }
@@ -1026,51 +1087,77 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 to.Count = arrLength - half;
             }
 
+            var node = lockBuffer.peek();
+            var parent = lockBuffer.peekParent();
+
             #if ConcurrentSortedDictionary_DEBUG
-            int version = assertWriterLock(beginWrite: true);
+            int version = node.assertWriterLock(beginWrite: true);
             #endif
 
             // Check if this node needs to split
-            if (!canSplit()) {
+            if (!node.canSplit()) {
                 #if ConcurrentSortedDictionary_DEBUG
-                assertWriterLock(version);
+                node.assertWriterLock(version);
+                #endif
+
+                latch.PopLatch(ref lockBuffer);
+
+                #if ConcurrentSortedDictionary_DEBUG
+                Test.Assert(!latch.HoldingRootLock);
+                Test.Assert(ReferenceEquals(null, lockBuffer.peek()));
                 #endif
 
                 return;
             }
 
+            bool isRoot = ReferenceEquals(null, parent);
+
             // 1. Make empty new node with the same parent as this node
-            var newNode = new ConcurrentKTreeNode<K, V>(this.k, this.Parent, this.isLeaf);
+            var newNode = new ConcurrentKTreeNode<K, V>(node.k, node.isLeaf);
 
             // 2. Copy k/2 largest from this node to the new node
             K newNodeMinKey;
-            splitCopy(this, in newNode, out newNodeMinKey);
+            splitCopy(node, in newNode, out newNodeMinKey);
 
             // 3a. Handle root edge case
-            if (this.isRoot) {
-                var newRoot = new ConcurrentKTreeNode<K, V>(this.k, null, false);
-                newRoot._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(default(K), this);
+            if (isRoot) {
+                var newRoot = new ConcurrentKTreeNode<K, V>(node.k, false);
+                newRoot._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(default(K), node);
                 newRoot._children[1] = new NodeData<K, ConcurrentKTreeNode<K, V>>(newNodeMinKey, in newNode);
                 newRoot.Count = 2;
-                newNode.Parent = newRoot;
-                this.Parent = newRoot;
                 tree.setRoot(newRoot); // Note* newRoot is not locked.. but noone else has ref to it since the root ptr is locked
 
-                if (this.isLeaf) LeafSiblingNodes.AtomicUpdateSplitNodes(this, newNode);
+                if (node.isLeaf) LeafSiblingNodes.AtomicUpdateSplitNodes(node, newNode);
 
                 #if ConcurrentSortedDictionary_DEBUG
-                assertRootWriteLockHeld(tree);
+                node.assertRootWriteLockHeld(tree);
+                #endif
+
+                // pop node off of latch (also unlocks node)
+                latch.PopLatch(ref lockBuffer);
+
+                #if ConcurrentSortedDictionary_DEBUG
+                Test.Assert(!latch.HoldingRootLock);
+                Test.Assert(ReferenceEquals(null, lockBuffer.peek()));
                 #endif
             // 3b. Otherwise, handle internal node parent
             } else {
-                var thisNodeIndex = this.Parent.indexOfNode(this);
+                var thisNodeIndex = parent.indexOfNode(node);
                 // Insert new node into the parent
-                this.Parent.indexInsert(thisNodeIndex + 1, newNodeMinKey, in this.Parent._children, in newNode);
+                parent.indexInsert(thisNodeIndex + 1, newNodeMinKey, in parent._children, in newNode);
 
-                if (this.isLeaf) LeafSiblingNodes.AtomicUpdateSplitNodes(this, newNode);
+                if (node.isLeaf) LeafSiblingNodes.AtomicUpdateSplitNodes(node, newNode);
+
+                // pop node off of latch (also unlocks node)
+                latch.PopLatch(ref lockBuffer);
+
+                #if ConcurrentSortedDictionary_DEBUG
+                parent.assertWriterLockHeld();
+                Test.Assert(ReferenceEquals(parent, lockBuffer.peek()));
+                #endif
 
                 // Try recurse on parent
-                this.Parent.trySplit(in tree);
+                trySplit(in tree, ref lockBuffer, ref latch);
             }
         }
 
@@ -1079,21 +1166,27 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// **WARNING**. This method assumes the calling thread has acquired all write locks needed
         /// for this write.
         /// </summary>
-        public void sync_DeleteAtThisNode(
+        public void sync_DeleteAtThisNode<LockBuffer>(
             in K key,
-            in ConcurrentSortedDictionary<K, V> tree
-        ) {
+            in ConcurrentSortedDictionary<K, V> tree,
+            ref LockBuffer lockBuffer,
+            ref Latch<K, V> latch
+        ) where LockBuffer: ILockBuffer<K, V> {
             if (!this.isLeaf) {
                 throw new Exception("Can only delete at leaf node");
             }
             this.orderedDelete(in key, in this._values);
-            this.tryMerge(in tree);
+            tryMerge(in tree, ref lockBuffer, ref latch);
         }
 
         /// <summary>
         /// This node will merge/adopt from siblings to maintain tree balane
         /// </summary>
-        private void tryMerge(in ConcurrentSortedDictionary<K, V> tree) {
+        private static void tryMerge<LockBuffer>(
+            in ConcurrentSortedDictionary<K, V> tree,
+            ref LockBuffer lockBuffer,
+            ref Latch<K, V> latch
+        ) where LockBuffer: ILockBuffer<K, V>{
             /// <summary>
             /// Merge 'left' into 'right'. Update parent accordingly.
             /// </summary>
@@ -1101,10 +1194,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 in ConcurrentKTreeNode<K, V> left,
                 in ConcurrentKTreeNode<K, V> right,
                 in int leftNodeIndex,
-                in int rightNodeIndex
+                in int rightNodeIndex,
+                in ConcurrentKTreeNode<K, V> parent
             ) {
-                var leftAncestorKey = left.Parent._children[leftNodeIndex].key;
-                var rightAncestorKey = right.Parent._children[rightNodeIndex].key;
+                var leftAncestorKey = parent._children[leftNodeIndex].key;
+                var rightAncestorKey = parent._children[rightNodeIndex].key;
 
                 // Perform Copy
                 if (left.isLeaf) {
@@ -1124,7 +1218,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     for (int i = 0; i < left.Count; i++) {
                         right._children[i] = new NodeData<K, ConcurrentKTreeNode<K, V>>(
                             left._children[i].key, left._children[i].value);
-                        right._children[i].value.Parent = right; // update parent ref
                         left._children[i] = default(NodeData<K, ConcurrentKTreeNode<K, V>>); // clear
                     }
                 }
@@ -1132,10 +1225,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 right.Count += left.Count;
                 left.Count = 0;
                 // De-parent the left node
-                left.Parent.deleteIndex(in leftNodeIndex, left.Parent._children);
-                left._parent = null;
+                parent.deleteIndex(in leftNodeIndex, parent._children);
                 // right is shifted left by one
-                right.Parent._children[rightNodeIndex - 1] = new NodeData<K, ConcurrentKTreeNode<K, V>>(leftAncestorKey, right);
+                parent._children[rightNodeIndex - 1] = new NodeData<K, ConcurrentKTreeNode<K, V>>(leftAncestorKey, right);
             }
             /// <summary>
             /// Merge 'right' into 'left'. Upate parent accordingly.
@@ -1144,9 +1236,10 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 in ConcurrentKTreeNode<K, V> left,
                 in ConcurrentKTreeNode<K, V> right,
                 in int leftNodeIndex,
-                in int rightNodeIndex
+                in int rightNodeIndex,
+                in ConcurrentKTreeNode<K, V> parent
             ) {
-                var rightAncestorKey = right.Parent._children[rightNodeIndex].key;
+                var rightAncestorKey = parent._children[rightNodeIndex].key;
 
                 // Perform copy
                 if (right.isLeaf) {
@@ -1160,7 +1253,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     for (int i = 0; i < right.Count; i++) {
                         left._children[left.Count + i] = new NodeData<K, ConcurrentKTreeNode<K, V>>(
                             right._children[i].key, right._children[i].value);
-                        left._children[left.Count + i].value.Parent = left; // update parent
                         right._children[i] = default(NodeData<K, ConcurrentKTreeNode<K,V>>); // clear
                     }
                 }
@@ -1168,8 +1260,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 left.Count += right.Count;
                 right.Count = 0;
                 // De-Parent the right node
-                right.Parent.deleteIndex(in rightNodeIndex, in right.Parent._children);
-                right._parent = null;
+                parent.deleteIndex(in rightNodeIndex, in parent._children);
             }
             /// <summary>
             /// Adopt left to right. 
@@ -1178,14 +1269,15 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 in ConcurrentKTreeNode<K, V> left,
                 in ConcurrentKTreeNode<K, V> right,
                 in int leftNodeIndex,
-                in int rightNodeIndex
+                in int rightNodeIndex,
+                in ConcurrentKTreeNode<K, V> parent
             ) {
                 int leftArrayIndex = left.Count - 1; // (index of max in left node)
 
                 K newParentMin;
-                var rightAncestorKey = right.Parent._children[rightNodeIndex].key;
+                var rightAncestorKey = parent._children[rightNodeIndex].key;
 
-                if (this.isLeaf) { // copy from left[count-1] to right [0]
+                if (left.isLeaf) { // copy from left[count-1] to right [0]
                     newParentMin = left._values[leftArrayIndex].key;
                     right.indexInsert(0, in left._values[leftArrayIndex].key, in right._values, in left._values[leftArrayIndex].value);
                     left._values[leftArrayIndex] = default(NodeData<K, V>);
@@ -1195,11 +1287,10 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     right._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(rightAncestorKey, right._children[0].value);
                     int insertedIndex = right.indexInsert(0, default(K),
                         in right._children, in left._children[leftArrayIndex].value);
-                    right._children[insertedIndex].value.Parent = right; // update parent ref
                     left._children[leftArrayIndex] = default(NodeData<K, ConcurrentKTreeNode<K, V>>);
                 }
                 // Update parent keys
-                right.Parent._children[rightNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(newParentMin, right);
+                parent._children[rightNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(newParentMin, right);
                 // Update counts
                 left.Count--;
             }
@@ -1210,10 +1301,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 in ConcurrentKTreeNode<K, V> left,
                 in ConcurrentKTreeNode<K, V> right,
                 in int leftNodeIndex,
-                in int rightNodeIndex
+                in int rightNodeIndex,
+                in ConcurrentKTreeNode<K, V> parent
             ) {
                 K newParentMin;
-                var rightAncestorKey = right.Parent._children[rightNodeIndex].key;
+                var rightAncestorKey = parent._children[rightNodeIndex].key;
 
                 if (right.isLeaf) { // copy right[0] to left[count]
                     newParentMin = right._values[1].key; // new parent min will be the next key...
@@ -1223,51 +1315,73 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     newParentMin = right._children[1].key;
                     left._children[left.Count] = new NodeData<K, ConcurrentKTreeNode<K, V>>(rightAncestorKey,
                         right._children[0].value);
-                    left._children[left.Count].value.Parent = left; // update parent ref
                     right.deleteIndex(0, right._children);
                     // reset the key on the first index in the right array
                     right._children[0] = new NodeData<K, ConcurrentKTreeNode<K, V>>(default(K), right._children[0].value);
                 }
                 // Update parent keys
-                right.Parent._children[rightNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(newParentMin, right);
+                parent._children[rightNodeIndex] = new NodeData<K, ConcurrentKTreeNode<K, V>>(newParentMin, right);
                 // update counts
                 left.Count++;
             }
 
+            var node = lockBuffer.peek();
+            var parent = lockBuffer.peekParent();
+            bool isRoot = ReferenceEquals(null, parent);
+
             #if ConcurrentSortedDictionary_DEBUG
-            int version = assertWriterLock(beginWrite: true);
+            int version = node.assertWriterLock(beginWrite: true);
             #endif
 
             // 1. Check if this node needs to merge or adopt
-            if (!canMerge()) {
+            if (!node.canMerge(isRoot)) {
                 #if ConcurrentSortedDictionary_DEBUG
-                assertWriterLock(version);
+                node.assertWriterLock(version);
+                #endif
+
+                latch.PopLatch(ref lockBuffer);
+
+                #if ConcurrentSortedDictionary_DEBUG
+                Test.Assert(!latch.HoldingRootLock);
+                Test.Assert(ReferenceEquals(null, lockBuffer.peek()));
                 #endif
 
                 return;
             }
-            bool isLeaf = this.isLeaf;
-            var parent = this.Parent;
+            bool isLeaf = node.isLeaf;
 
             // 2. Handle root edge case
-            if (this.isRoot) {
+            if (isRoot) {
                 // Try to select new root if this root only has 1 child
                 if (!isLeaf) {
                     #if ConcurrentSortedDictionary_DEBUG
-                    Test.Assert(this.Count == 1);
+                    Test.Assert(node.Count == 1);
                     #endif
-                    this._children[0].value._parent = null; // remove parent ref (child will become root)
-                    tree.setRoot(this._children[0].value); // set new root
+                    tree.setRoot(node._children[0].value); // set new root
 
                     #if ConcurrentSortedDictionary_DEBUG
-                    assertWriterLock(version);
-                    assertRootWriteLockHeld(tree);
+                    node.assertWriterLock(version);
+                    node.assertRootWriteLockHeld(tree);
+                    #endif
+
+                    latch.PopLatch(ref lockBuffer);
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    Test.Assert(!latch.HoldingRootLock);
+                    Test.Assert(ReferenceEquals(null, lockBuffer.peek()));
                     #endif
 
                     return;
                 }
                 #if ConcurrentSortedDictionary_DEBUG
-                assertWriterLock(version);
+                node.assertWriterLock(version);
+                #endif
+
+                latch.PopLatch(ref lockBuffer);
+
+                #if ConcurrentSortedDictionary_DEBUG
+                Test.Assert(!latch.HoldingRootLock);
+                Test.Assert(ReferenceEquals(null, lockBuffer.peek()));
                 #endif
 
                 // Otherwise, root remains...
@@ -1278,7 +1392,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             parent.assertWriterLockHeld();
             #endif
 
-            int nodeIndex = parent.indexOfNode(this);
+            int nodeIndex = parent.indexOfNode(node);
             int leftIndex = nodeIndex - 1;
             int rightIndex = nodeIndex + 1;
             var left = nodeIndex > 0 ? parent._children[leftIndex].value : null;
@@ -1293,38 +1407,52 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 if (!ReferenceEquals(null, right)) right._rwLock.EnterWriteLock();
 
                 // 3. Try to Adopt from left
-                if (!ReferenceEquals(null, left) && left.canSafelyDelete()) {
-                    adoptLeft(in left, this, in leftIndex, in nodeIndex);
+                if (!ReferenceEquals(null, left) && left.canSafelyDelete(isRoot)) {
+                    adoptLeft(in left, node, in leftIndex, in nodeIndex, parent);
 
                     #if ConcurrentSortedDictionary_DEBUG
-                    assertWriterLock(version);
+                    node.assertWriterLock(version);
+                    #endif
+
+                    latch.ExitLatchChain(ref lockBuffer);
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    Test.Assert(!latch.HoldingRootLock);
+                    Test.Assert(ReferenceEquals(null, lockBuffer.peek()));
                     #endif
 
                     return;
                 }
                 // 4. Try to Adopt from right
-                if (!ReferenceEquals(null, right) && right.canSafelyDelete()) {
-                    adoptRight(this, in right, in nodeIndex, in rightIndex);
+                if (!ReferenceEquals(null, right) && right.canSafelyDelete(isRoot)) {
+                    adoptRight(node, in right, in nodeIndex, in rightIndex, parent);
 
                     #if ConcurrentSortedDictionary_DEBUG
-                    assertWriterLock(version);
+                    node.assertWriterLock(version);
+                    #endif
+
+                    latch.ExitLatchChain(ref lockBuffer);
+
+                    #if ConcurrentSortedDictionary_DEBUG
+                    Test.Assert(!latch.HoldingRootLock);
+                    Test.Assert(ReferenceEquals(null, lockBuffer.peek()));
                     #endif
 
                     return;
                 }
                 // 5a. Merge Right if possible
                 if (!ReferenceEquals(null, right)) {
-                    mergeRight(this, in right, in nodeIndex, in rightIndex);
+                    mergeRight(node, in right, in nodeIndex, in rightIndex, parent);
                     if (right.isLeaf) LeafSiblingNodes.AtomicUpdateMergeNodes(in right);
                 }
                 // 5b. Otherwise Merge left
                 else {
-                    mergeLeft(in left, this, in leftIndex, in nodeIndex);
+                    mergeLeft(in left, node, in leftIndex, in nodeIndex, parent);
                     if (left.isLeaf) LeafSiblingNodes.AtomicUpdateMergeNodes(in left);
                 }
 
                 #if ConcurrentSortedDictionary_DEBUG
-                assertWriterLock(version);
+                node.assertWriterLock(version);
                 #endif
 
             } finally {
@@ -1332,8 +1460,15 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 if (!ReferenceEquals(null, right)) right._rwLock.ExitWriteLock();
             }
 
+            // pop node
+            latch.PopLatch(ref lockBuffer);
+
+            #if ConcurrentSortedDictionary_DEBUG
+            Test.Assert(ReferenceEquals(parent, lockBuffer.peek()));
+            #endif
+
             // 6. Try to merge recurse on parent
-            parent.tryMerge(in tree);
+            tryMerge(in tree, ref lockBuffer, ref latch);
         }
 
         /// <summary>
@@ -1425,7 +1560,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             int remainingMs = getRemainingMs(in options.startTime, in options.timeoutMs);
 
             // Try enter latch on this (ie the root node)
-            LatchAccessResult result = latch.TryEnterLatch(ref lockBuffer, in info.node, in remainingMs);
+            LatchAccessResult result = latch.TryEnterLatch(ref lockBuffer, in info.node, in remainingMs, true);
             if (result == LatchAccessResult.timedOut || result == LatchAccessResult.notSafeToUpdateLeaf) {
                  value = default(V);
                 info.index = -1;
@@ -1482,7 +1617,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     info.depth = depth + 1;
 
                     // Try Enter latch on next node (which will also atomically exit latch on parent)
-                    result = latch.TryEnterLatch(ref lockBuffer, in info.node, in remainingMs);
+                    result = latch.TryEnterLatch(ref lockBuffer, in info.node, in remainingMs, false);
                     if (result == LatchAccessResult.timedOut || result == LatchAccessResult.notSafeToUpdateLeaf) {
                         value = default(V);
                         info.index = -1;
@@ -1609,9 +1744,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         private bool canSplit() {
             return this.Count > this.k; // split if we exceeded allowed count
         }
-        
-        private bool canSafelyDelete() {
-            if (this.isRoot) {
+
+        private bool canSafelyDelete(bool isRoot) {
+            if (isRoot) {
                 return this.Count > 2; // root optimization (root only gets deleted on 1 node)
             }
             int k = this.k;
@@ -1619,9 +1754,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             int checkLength = k % 2 == 0 ? k / 2 : k / 2 + 1;
             return this.Count > checkLength;
         }
-        
-        private bool canMerge() {
-            if (this.isRoot) {
+
+        private bool canMerge(bool isRoot) {
+            if (isRoot) {
                 return this.Count < 2;  // root optimization (root only gets deleted on 1 node)
             }
             int k = this.k; // merge if less than k/2 items in array
@@ -1632,11 +1767,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <summary>
         /// Check if inserting/deleting on this node will cause a split or merge to parent
         /// </summary>
-        public bool NodeIsSafe(bool isInsertAccess, bool isDeleteAccess) {
+        public bool NodeIsSafe(bool isInsertAccess, bool isDeleteAccess, bool isRoot) {
             if (isInsertAccess) {
                 return canSafelyInsert();
             } else if (isDeleteAccess) {
-                return canSafelyDelete();
+                return canSafelyDelete(isRoot);
             } else {
                 throw new ArgumentException("Unsupported latch access type");
             }
