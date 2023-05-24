@@ -415,34 +415,32 @@ public class ConcurrencyTest {
     
 
     public void run() {
-        //TODO: Deadlock test
-        // iterator + reversed it test
-        //concurrent dict parity test
+        //TODO: reversed it test
         {
-            //ConcurrentSortedDictionary<int, int>.LockTest(ms: 60000);
+            ConcurrentSortedDictionary<int, int>.LockTest(ms: 60000);
         }
-        // parity test
-        // {
-        //     int count = 20 * 32;
-        //     var intrange = Enumerable.Range(1, count);
-        //     // int int tests
-        //     var intint = new TypedTest<int, int>();
-        //     var intint_pairs = intrange
-        //         .Select(x => new ValueTuple<int, int>(x, -x))
-        //         .ToList();
-        //     intint.rand_add_remove_parity_test(32, intint_pairs, ms: 60000);
-        // }
-        // // small tree cycle test
-        // {
-        //     int count = 20 * 32;
-        //     var intrange = Enumerable.Range(1, count);
-        //     // int int tests
-        //     var intint = new TypedTest<int, int>();
-        //     var intint_pairs = intrange
-        //         .Select(x => new ValueTuple<int, int>(x, -x))
-        //         .ToList();
-        //     intint.rand_add_remove_cycle_test(32, intint_pairs, ms: 120000);
-        // }
+        //parity test
+        {
+            int count = 20 * 32;
+            var intrange = Enumerable.Range(1, count);
+            // int int tests
+            var intint = new TypedTest<int, int>();
+            var intint_pairs = intrange
+                .Select(x => new ValueTuple<int, int>(x, -x))
+                .ToList();
+            intint.rand_add_remove_parity_test(32, intint_pairs, ms: 60000);
+        }
+        // small tree cycle test
+        {
+            int count = 20 * 32;
+            var intrange = Enumerable.Range(1, count);
+            // int int tests
+            var intint = new TypedTest<int, int>();
+            var intint_pairs = intrange
+                .Select(x => new ValueTuple<int, int>(x, -x))
+                .ToList();
+            intint.rand_add_remove_cycle_test(32, intint_pairs, ms: 120000);
+        }
         // small tree test
         {
             int count = 20 * 32;
