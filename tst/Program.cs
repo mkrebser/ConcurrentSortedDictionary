@@ -11,8 +11,8 @@ Console.WriteLine("Starting...");
 
 
 new BPlusTreeCorrectnessTest().run();
-new PerfTest().run();
 new ConcurrencyTest().run();
+new PerfTest().run();
 
 
 

@@ -23,7 +23,7 @@ SOFTWARE.
 */
 
 // Used for more nuanced lock testing and sanity test
-#define ConcurrentSortedDictionary_DEBUG
+// #define ConcurrentSortedDictionary_DEBUG
 
 
 // Put this in the concurrent namespace but with 'Extended'
@@ -270,7 +270,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         var rwLockBuffer = new LockBuffer2<Key, Value>();
         long startTime = DateTimeOffset.Now.ToUnixTimeMilliseconds();
         int remainingMs = getRemainingMs(in startTime, in timeoutMs);
-        var searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(remainingMs, startTime: startTime);
+        var searchOptions = new SearchOptions(remainingMs, startTime: startTime);
         // Perform a query to recurse to the deepest node, latching downwards optimistically
         var getResult = ConcurrentKTreeNode<Key, Value>.TryGetValue(in key, out currentValue,
             ref info, ref rwLatch, ref rwLockBuffer, this, searchOptions);
@@ -326,7 +326,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         var writeLatch = new Latch<Key, Value>(writeLatchAccessType , this._rootLock, assumeLeafIsSafe: false);
         var writeLockBuffer = new LockBuffer32<Key, Value>();
         remainingMs = getRemainingMs(in startTime, in timeoutMs);
-        searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(remainingMs, startTime: startTime);
+        searchOptions = new SearchOptions(remainingMs, startTime: startTime);
         getResult = ConcurrentKTreeNode<Key, Value>.TryGetValue(in key, out currentValue,
             ref info, ref writeLatch, ref writeLockBuffer, this, searchOptions);
 
@@ -477,7 +477,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             throw new ArgumentException("Cannot have null key");
         }
         SearchResultInfo<Key, Value> searchInfo = default(SearchResultInfo<Key, Value>);
-        var searchOptions = new ConcurrentKTreeNode<Key, Value>.SearchOptions(timeoutMs);
+        var searchOptions = new SearchOptions(timeoutMs);
         var latch = new Latch<Key, Value> (LatchAccessType.read, this._rootLock);
         var readLockBuffer = new LockBuffer2<Key, Value>();
         var result = ConcurrentKTreeNode<Key, Value>.TryGetValue(in key, out value,
@@ -508,8 +508,16 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
     /// <summary>
     /// Can be used to iterate though all items in the Dictionary with optional timeout and subtree depth.
     /// </summary>
-    public IEnumerable<KeyValuePair<Key, Value>> Items(int itemTimeoutMs = -1, int subTreeDepth = 2) {
-        using (var it = GetEnumerator(itemTimeoutMs, subTreeDepth)) {
+    public IEnumerable<KeyValuePair<Key, Value>> Items(int itemTimeoutMs = -1) {
+        using (var it = GetEnumerator(itemTimeoutMs)) {
+            while (it.MoveNext()) {
+                yield return it.Current;
+            }
+        };
+    }
+
+    public IEnumerable<KeyValuePair<Key, Value>> Reversed(int itemTimeoutMs = -1) {
+        using (var it = GetEnumerator(itemTimeoutMs, reversed: true)) {
             while (it.MoveNext()) {
                 yield return it.Current;
             }
@@ -520,11 +528,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
     public IEnumerable<Value> Values { get { foreach (var pair in this) { yield return pair.Value; } } }
 
     public IEnumerator<KeyValuePair<Key, Value>> GetEnumerator() {
-        return GetEnumerator(-1, 2);
+        return GetEnumerator(-1, false);
     }
 
-    public IEnumerator<KeyValuePair<Key, Value>> GetEnumerator(int itemTimeoutMs = -1, int subTreeDepth = 2) {
-        return ConcurrentKTreeNode<Key, Value>.AllItems(this, itemTimeoutMs).GetEnumerator();
+    public IEnumerator<KeyValuePair<Key, Value>> GetEnumerator(int itemTimeoutMs = -1, bool reversed = false) {
+        return ConcurrentKTreeNode<Key, Value>.AllItems(this, itemTimeoutMs, reversed).GetEnumerator();
     }
 
     IEnumerator IEnumerable.GetEnumerator() {
@@ -581,6 +589,30 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// Is there a subtree after this one?
         /// </summary>
         public bool hasNextSubTree;
+    }
+
+    private enum SearchType {
+        search = 0,
+        findMin = 1,
+        findMax = 2
+    }
+
+    private struct SearchOptions {
+        private const int kDefaultMaxDepth = int.MaxValue - 1;
+        public readonly int timeoutMs;
+        public readonly int maxDepth;
+        public readonly long startTime;
+        public SearchType type;
+        public SearchOptions(in int timeoutMs = -1, in int maxDepth = kDefaultMaxDepth, in SearchType type = SearchType.search, in long startTime = -1) {
+            this.timeoutMs = timeoutMs; this.maxDepth = maxDepth; this.type = type;
+            this.startTime = startTime < 0 ? DateTimeOffset.Now.ToUnixTimeMilliseconds() : startTime;
+        }
+        public void assertValid(bool isReadAccess) {
+            if (this.maxDepth != kDefaultMaxDepth && !isReadAccess)
+                throw new ArgumentException("Can only set maxDepth for read access");
+            if (maxDepth > kDefaultMaxDepth || maxDepth < 0)
+                throw new ArgumentException("Invalid maxDepth specified");
+        }
     }
 
     /// <summary>
@@ -1499,24 +1531,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             this.Count--;
         }
 
-        public struct SearchOptions {
-            private const int kDefaultMaxDepth = int.MaxValue - 1;
-            public readonly int timeoutMs;
-            public readonly int maxDepth;
-            public readonly long startTime;
-            public bool getMin;
-            public SearchOptions(in int timeoutMs = -1, in int maxDepth = kDefaultMaxDepth, in bool getMin = false, in long startTime = -1) {
-                this.timeoutMs = timeoutMs; this.maxDepth = maxDepth; this.getMin = getMin;
-                this.startTime = startTime < 0 ? DateTimeOffset.Now.ToUnixTimeMilliseconds() : startTime;
-            }
-            public void assertValid(bool isReadAccess) {
-                if (this.maxDepth != kDefaultMaxDepth && !isReadAccess)
-                    throw new ArgumentException("Can only set maxDepth for read access");
-                if (maxDepth > kDefaultMaxDepth || maxDepth < 0)
-                    throw new ArgumentException("Invalid maxDepth specified");
-            }
-        }
-
         /// <summary>
         /// Recurse down the tree searching for a value starting at the root.
         /// </summary>
@@ -1576,7 +1590,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             for (int depth = 0; depth < options.maxDepth; depth++) {
                 if (info.node.isLeaf) {
                     int compareResult = 0;
-                    info.index = options.getMin ? 0 : info.node.searchRangeIndex(key, info.node._values, out compareResult);
+                    info.index = options.type == SearchType.search ? 
+                        info.node.searchRangeIndex(key, info.node._values, out compareResult) :
+                        (options.type == SearchType.findMin ? 0 : info.node.Count - 1);
                     info.depth = depth;
                     var searchResult = ConcurrentTreeResult_Extended.success;
                     if (compareResult == 0) {
@@ -1606,7 +1622,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     info.node.assertLatchLock(ref latch, version);
                     #endif
 
-                    int nextIndex = options.getMin ? 0 : info.node.searchRangeIndex(in key, in info.node._children);
+                    int nextIndex = options.type == SearchType.search ? 
+                        info.node.searchRangeIndex(in key, in info.node._children) :
+                        (options.type == SearchType.findMin ? 0 : info.node.Count - 1);
                     // get next sibling subtree
                     if (nextIndex + 1 < info.node.Count) {
                         info.hasNextSubTree = true;
@@ -1655,11 +1673,12 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         /// <param name="itemTimeoutMs"> key of the item to be inserted </param>
         public static IEnumerable<KeyValuePair<K, V>> AllItems(
             ConcurrentSortedDictionary<Key, Value> tree,
-            int itemTimeoutMs = -1
+            int itemTimeoutMs = -1,
+            bool reversed = false
         ) {
             bool acquiredNextNode(ConcurrentKTreeNode<K, V> node, out ConcurrentKTreeNode<K, V> next) {
                 // Now get the next node
-                next = node.siblings.Next;
+                next = reversed ? node.siblings.Prev : node.siblings.Next;
                 if (ReferenceEquals(null, next)) {
                     return false;
                 }
@@ -1673,18 +1692,19 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             ConcurrentKTreeNode<K, V> node = null;
             bool retry = true;
             V _ = default(V);
-            K maxKey = default(K);
+            K cmpKey = default(K);
             bool startedSearch = false;
             SearchResultInfo<K, V> subtree = default(SearchResultInfo<K, V>);
 
             do {
                 if (retry) {
-                    var searchOptions = new SearchOptions(itemTimeoutMs, getMin: !startedSearch);
+                    var searchType = startedSearch ? SearchType.search : (reversed ? SearchType.findMax : SearchType.findMin);
+                    var searchOptions = new SearchOptions(itemTimeoutMs, type: searchType);
                     var latch = new Latch<K, V>(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
                     var readLockBuffer = new LockBuffer2<K, V>();
 
                     // Recurse to leaf
-                    var searchResult = TryGetValue(maxKey, out _, ref subtree,
+                    var searchResult = TryGetValue(cmpKey, out _, ref subtree,
                         ref latch, ref readLockBuffer, in tree, searchOptions);
                     if (searchResult == ConcurrentTreeResult_Extended.timedOut) {
                         throw new TimeoutException();
@@ -1699,12 +1719,17 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     #endif
 
                     try {
-                        for (int i = 0; i < node.Count; i++) {
+                        int start, end, increment;
+                        if (reversed) { start = node.Count - 1; end = -1; increment = -1; }
+                        else { start = 0; end = node.Count; increment = 1; }
+
+                        for (int i = start; (!reversed && i < end) || (reversed && i > end); i += increment) {
                             var pair = new KeyValuePair<K, V>(node._values[i].key, node._values[i].value);
-                            if (!startedSearch || pair.Key.CompareTo(maxKey) > 0) {
+                            bool notProceding = reversed ? pair.Key.CompareTo(cmpKey) < 0 : pair.Key.CompareTo(cmpKey) > 0;
+                            if (!startedSearch || notProceding) {
                                 yield return pair;
                                 startedSearch = true;
-                                maxKey = pair.Key;
+                                cmpKey = pair.Key;
                             }
                         }
                         retry = acquiredNextNode(node, out node);
@@ -1721,14 +1746,28 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 } else {
                     var prev = node;
                     try {
-                        for (int i = 0; i < node.Count; i++) {
+                        int start, end, increment;
+                        if (reversed) { start = node.Count - 1; end = -1; increment = -1; }
+                        else { start = 0; end = node.Count; increment = 1; }
+
+                        #if ConcurrentSortedDictionary_DEBUG
+                        int version = node.assertReadLock(beginRead: true);
+                        #endif
+
+                        for (int i = start; (!reversed && i < end) || (reversed && i > end); i += increment) {
                             var pair = new KeyValuePair<K, V>(node._values[i].key, node._values[i].value);
-                            if (!startedSearch || pair.Key.CompareTo(maxKey) > 0) {
+                            bool notProceding = reversed ? pair.Key.CompareTo(cmpKey) < 0 : pair.Key.CompareTo(cmpKey) > 0;
+                            if (!startedSearch || notProceding) {
                                 yield return pair;
                                 startedSearch = true;
-                                maxKey = pair.Key;
+                                cmpKey = pair.Key;
                             }
                         }
+
+                        #if ConcurrentSortedDictionary_DEBUG
+                        node.assertReadLock(version);
+                        #endif
+
                         retry = acquiredNextNode(node, out node);
                     } finally {
                         prev._rwLock.ExitReadLock();

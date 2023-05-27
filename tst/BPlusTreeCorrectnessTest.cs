@@ -75,9 +75,15 @@ public class BPlusTreeCorrectnessTest {
             tree.AssertTreeState(pairs.Count);
 
             var treeList = tree.ToList();
+            var reversedTree = tree.Reversed().ToList();
             var orderedPairs = pairs.ToList(); orderedPairs.Sort((x, y) => x.Item1.CompareTo(y.Item1));
             // Assert that the tree maintained order...
             foreach (var tuple in orderedPairs.Zip(treeList, (listPair, treePair) => (listPair, treePair))) {
+                Test.AssertEqual(tuple.listPair.Item1, tuple.treePair.Key);
+                Test.AssertEqual(tuple.listPair.Item2, tuple.treePair.Value);
+            }
+            orderedPairs.Reverse();
+            foreach (var tuple in orderedPairs.Zip(reversedTree, (listPair, treePair) => (listPair, treePair))) {
                 Test.AssertEqual(tuple.listPair.Item1, tuple.treePair.Key);
                 Test.AssertEqual(tuple.listPair.Item2, tuple.treePair.Value);
             }

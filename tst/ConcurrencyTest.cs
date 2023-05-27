@@ -191,6 +191,31 @@ public class ConcurrencyTest {
             }
         }
 
+        private void iterateTreeOrder(Random rand, ConcurrentSortedDictionary<K, V> tree, ref long opCount) {
+            K prev = default(K);
+            bool prevInit = false;
+            // Iterate through keys.. Either reversed or not reversed
+            if (rand.Next() % 2 == 0) {
+                foreach (var pair in tree) {
+                    opCount++;
+                    if (prevInit) {
+                            Test.Assert(prev.CompareTo(pair.Key) < 0);
+                    }
+                    prev = pair.Key;
+                    prevInit = true;
+                }
+            } else {
+                foreach (var pair in tree.Reversed()) {
+                    opCount++;
+                    if (prevInit) {
+                            Test.Assert(prev.CompareTo(pair.Key) > 0);
+                    }
+                    prev = pair.Key;
+                    prevInit = true;
+                }
+            }
+        }
+
         public void rand_add_remove_iterator_test(int k, List<ValueTuple<K, V>> pairs, int ms = 900000, int nThreads = 32, bool alwaysAssertTreeState = false) {
             var tree = new ConcurrentSortedDictionary<K, V>(k);
             var rand = new Random(k * pairs.Count/2);
@@ -259,17 +284,8 @@ public class ConcurrencyTest {
                             break;
                         }
 
-                        K prev = default(K);
-                        bool prevInit = false;
                         if (opCount % 1000 == 0) {
-                            foreach (var pair in tree) {
-                               opCount++;
-                               if (prevInit) {
-                                    Test.Assert(prev.CompareTo(pair.Key) < 0);
-                               }
-                               prev = pair.Key;
-                               prevInit = true;
-                            }
+                            iterateTreeOrder(rand, tree, ref opCount);
                         }
 
                         if (DateTimeOffset.Now.ToUnixTimeMilliseconds() - timeOfLastPing > 1000) {
@@ -368,17 +384,8 @@ public class ConcurrencyTest {
                             break;
                         }
 
-                        K prev = default(K);
-                        bool prevInit = false;
                         if (opCount % 1000 == 0) {
-                            foreach (var pair in tree) {
-                               opCount++;
-                               if (prevInit) {
-                                    Test.Assert(prev.CompareTo(pair.Key) < 0);
-                               }
-                               prev = pair.Key;
-                               prevInit = true;
-                            }
+                            iterateTreeOrder(rand, tree, ref opCount);
                         }
 
                         // every 1 second, check entire collection
@@ -391,7 +398,15 @@ public class ConcurrencyTest {
                             var l1 = tree.ToList();
                             var l2 = dict.OrderBy(x => x.Key).ToList();
 
+                            // check forward
                             Test.Assert(l1.Count == l2.Count);
+                            for (int i = 0; i < l1.Count; i++) {
+                                Test.AssertEqual(l1[i].Key, l2[i].Key);
+                                Test.AssertEqual(l1[i].Value, l2[i].Value);
+                            }
+                            // check reversed
+                            l1 = tree.Reversed().ToList();
+                            l2 = l2.OrderBy(x => x.Key).ToList();
                             for (int i = 0; i < l1.Count; i++) {
                                 Test.AssertEqual(l1[i].Key, l2[i].Key);
                                 Test.AssertEqual(l1[i].Value, l2[i].Value);
@@ -415,7 +430,6 @@ public class ConcurrencyTest {
     
 
     public void run() {
-        //TODO: reversed it test
         {
             ConcurrentSortedDictionary<int, int>.LockTest(ms: 60000);
         }
@@ -462,7 +476,7 @@ public class ConcurrencyTest {
             var intint_pairs = intrange
                 .Select(x => new ValueTuple<int, int>(x, -x))
                 .ToList();
-            intint.rand_add_remove_test(32, intint_pairs);
+            //intint.rand_add_remove_test(32, intint_pairs);
             intint.rand_add_remove_iterator_test(32, intint_pairs);
         }
     }

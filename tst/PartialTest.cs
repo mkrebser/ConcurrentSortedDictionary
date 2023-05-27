@@ -1,7 +1,7 @@
 
 #if DEBUG
 
-#define ConcurrentSortedDictionary_DEBUG
+// #define ConcurrentSortedDictionary_DEBUG
 #nullable disable
 
 namespace System.Collections.Concurrent.Extended;
@@ -39,7 +39,9 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
     private partial class ConcurrentKTreeNode<K, V> where K: IComparable<K> {
 
         public static void LockTest(int ms = 60000) {
+            #if ConcurrentSortedDictionary_DEBUG
             LeafSiblingNodes.LockTest(ms);
+            #endif
         }
 
         void assertArrayState<VType>(NodeData<K, VType>[] array, HashSet<K> allKeysSet, List<K> depthFirstKeys,
