@@ -2019,7 +2019,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
     }
 
     private static int getRemainingMs(in long startTime, in int timeoutMs) {
-        return timeoutMs < 0 ? -1 : Math.Max(0, timeoutMs - (int)(DateTimeOffset.Now.ToUnixTimeMilliseconds() - startTime));
+        return timeoutMs < 0 ? -1 : Math.Max(0, timeoutMs - ((int)(DateTimeOffset.Now.ToUnixTimeMilliseconds() - startTime)));
     }
 }
 
