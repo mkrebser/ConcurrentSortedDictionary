@@ -109,11 +109,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
     }
 
     private readonly ReaderWriterLockSlim _rootLock;
-    private volatile int _count;
+    private long _count;
     /// <summary>
     /// Number of key-value pairs in the collection. Value may be stale in concurrent access.
     /// </summary>
-    public int Count { get { return _count; } }
+    public long Count { get { return _count; } }
     /// <summary>
     /// Is collection empty? Value may be stale in concurrent access.
     /// </summary>

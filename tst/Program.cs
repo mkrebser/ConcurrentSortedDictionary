@@ -10,7 +10,7 @@ Console.WriteLine("Starting...");
 // dotnet run --configuration Release
 
 
-//new BPlusTreeCorrectnessTest().run();
+new BPlusTreeCorrectnessTest().run();
 new ConcurrencyTest().run();
 new PerfTest().run();
 

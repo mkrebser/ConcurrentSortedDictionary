@@ -179,7 +179,7 @@ public class BPlusTreeCorrectnessTest {
                 }
 
                 if (alwaysAssertTreeState || rand.Next() % pairs.Count == 0) {
-                    tree.AssertTreeState(tree.Count);
+                    tree.AssertTreeState((int)tree.Count);
                 }
 
                 opCount += 2;
