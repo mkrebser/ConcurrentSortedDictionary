@@ -240,8 +240,13 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         return retrievedValue;
     }
 
-    void tryUpdateDepth(int newSearchDepth) {
+    void tryUpdateDepth<LockBuffer>(
+        int newSearchDepth,
+        ref Latch<Key, Value> latch,
+        ref LockBuffer lockBuffer
+    ) where LockBuffer: ILockBuffer<Key, Value> {
         if (newSearchDepth >= 30) {
+            latch.ExitLatchChain(ref lockBuffer);
             throw new ArgumentException("Reached 31 tree limit depth. Only a max of "
                 + (int)Math.Pow(this.k, 31) + " items is supported. Increasing 'k' will increase limit.");
         }
@@ -298,7 +303,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 #endif
 
                 if (rwLatch.isInsertAccess) {
-                    tryUpdateDepth(info.depth);
+                    tryUpdateDepth(info.depth, ref rwLatch, ref rwLockBuffer);
                     return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue,
                         exitOnTest, ref rwLockBuffer, ref rwLatch);
                 } else {
@@ -342,7 +347,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             #endif
 
             if (writeLatch.isInsertAccess) {
-                tryUpdateDepth(info.depth);
+                tryUpdateDepth(info.depth, ref writeLatch, ref writeLockBuffer);
                 return writeInsertion(in key, in value, in info, in getResult, in overwrite, out retrievedValue,
                     false, ref writeLockBuffer, ref writeLatch);
             } else {
