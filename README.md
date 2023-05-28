@@ -57,6 +57,9 @@ if (myDict.ContainsKey("key1")) {
 foreach (KeyValuePair<string, int> pair in myDict) {
   // Do something
 }
+foreach (KeyValuePair<string, int> pair in myDict.Reversed()) {
+  // Do something
+}
 ```
 #### `Value this[Key key] { get; set; }`
 ```
