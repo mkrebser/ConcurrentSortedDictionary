@@ -11,11 +11,11 @@ ConcurrentSortedDictionary<Key, Value> implementation in (c#, .NET 7).
   - Nodes in the tree have 'k' children.
 
 ## Properties
-### `Count`
+### `long Count { get; }`
  - Number of items in the dictionary
-### `Depth`
+### `int Depth { get; }`
  - Depth of the underlying B+Tree
-### `IsEmpty`
+### `bool IsEmpty { get; }`
 - Check if the Dictionary is empty.
 
 ## Methods
@@ -108,3 +108,6 @@ Console.WriteLine(myDict["key1"]);
  - A timeout of '-1' will make the calling thread wait forever to acquire locks
  - A timeout > 0 will make the calling wait for the specified milliseconds before timeout occurs
  - Methods that don't allow specifying a timeout will automatically use '-1'
+
+### Limitations
+ - The tree will allow at most k^30 nodes. This means the default (k=32) will allow 32^30 items in the tree.
