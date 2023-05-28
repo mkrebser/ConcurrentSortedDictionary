@@ -143,6 +143,30 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         _depth = 0;
         this.k = k;
     }
+    public ConcurrentSortedDictionary(ICollection<KeyValuePair<Key, Value>> collection, int k = 32): this(k) {
+        if (ReferenceEquals(null, collection))
+            throw new ArgumentException("Cannot input null collection");
+        foreach (var pair in collection)
+            AddOrUpdate(pair.Key, pair.Value);
+    }
+    public ConcurrentSortedDictionary(ICollection<ValueTuple<Key, Value>> collection, int k = 32): this(k) {
+        if (ReferenceEquals(null, collection))
+            throw new ArgumentException("Cannot input null collection");
+        foreach (var pair in collection)
+            AddOrUpdate(pair.Item1, pair.Item2);
+    }
+    public ConcurrentSortedDictionary(ICollection<Tuple<Key, Value>> collection, int k = 32): this(k) {
+        if (ReferenceEquals(null, collection))
+            throw new ArgumentException("Cannot input null collection");
+        foreach (var pair in collection)
+            AddOrUpdate(pair.Item1, pair.Item2);
+    }
+    public ConcurrentSortedDictionary(ICollection<Key> keys, ICollection<Value> values, int k = 32): this(k) {
+        if (ReferenceEquals(null, keys) || ReferenceEquals(null, values))
+            throw new ArgumentException("Cannot input null collection");
+        foreach (var pair in keys.Zip(values))
+            AddOrUpdate(pair.Item1, pair.Item2);
+    }
 
     void assertTimeoutArg(in int timeoutMs) {
         if (timeoutMs < 0)
@@ -1581,7 +1605,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
             // Try enter latch on this (ie the root node)
             LatchAccessResult result = latch.TryEnterLatch(ref lockBuffer, in info.node, in remainingMs, true);
             if (result == LatchAccessResult.timedOut || result == LatchAccessResult.notSafeToUpdateLeaf) {
-                 value = default(V);
+                value = default(V);
                 info.index = -1;
                 return result == LatchAccessResult.timedOut ?
                     ConcurrentTreeResult_Extended.timedOut :
@@ -1995,7 +2019,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
     }
 
     private static int getRemainingMs(in long startTime, in int timeoutMs) {
-        return timeoutMs <= 0 ? -1 : (int)(DateTimeOffset.Now.ToUnixTimeMilliseconds() - startTime);
+        return timeoutMs < 0 ? -1 : Math.Max(0, timeoutMs - (int)(DateTimeOffset.Now.ToUnixTimeMilliseconds() - startTime));
     }
 }
 

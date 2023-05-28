@@ -316,6 +316,26 @@ public class ConcurrencyTest {
             }
         }
 
+        public void timeout_test(int k, List<ValueTuple<K, V>> pairs) {
+            var tree = new ConcurrentSortedDictionary<K, V>(pairs);
+            foreach (var pair in pairs) {
+                foreach (var p in tree.Items(4000)) {
+                    if (p.Key.Equals(pair.Item1)) {
+                        var pollThread1 = new Thread(() => {
+                            Test.AssertEqual(RemoveResult.timedOut, tree.TryRemove(pair.Item1, 1));
+                            Test.AssertEqual(InsertResult.timedOut, tree.TryAdd(pair.Item1, pair.Item2, 1));
+                            Test.AssertEqual(InsertResult.timedOut, tree.AddOrUpdate(pair.Item1, pair.Item2, 1));
+                            V val;
+                            Test.AssertEqual(InsertResult.timedOut, tree.GetOrAdd(pair.Item1, pair.Item2, 1, out val));
+                        });
+                        pollThread1.Start();
+                        if (!pollThread1.Join(4000)) { throw new TimeoutException(); }
+                    }
+                }
+                tree.AssertTreeState(pairs.Count);
+            }
+        }
+
         public void rand_add_remove_parity_test(int k, List<ValueTuple<K, V>> pairs, int ms = 60000, int nThreads = 32, bool alwaysAssertTreeState = false) {
             var tree = new ConcurrentSortedDictionary<K, V>(k);
             var dict = new ConcurrentDictionary<K, V>();
@@ -430,6 +450,18 @@ public class ConcurrencyTest {
     
 
     public void run() {
+        // timeout test
+        {
+            int count = 100;
+            var intrange = Enumerable.Range(1, count);
+            // int int tests
+            var intint = new TypedTest<int, int>();
+            var intint_pairs = intrange
+                .Select(x => new ValueTuple<int, int>(x, -x))
+                .ToList();
+            intint.timeout_test(3, intint_pairs);
+        }
+        // linked list lock test
         {
             ConcurrentSortedDictionary<int, int>.LockTest(ms: 60000);
         }
