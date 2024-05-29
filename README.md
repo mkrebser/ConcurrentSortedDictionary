@@ -11,8 +11,9 @@ ConcurrentSortedDictionary<Key, Value> implementation in (c#, .NET 7).
 - Mutual Exclusion is guarenteed via latching using Reader-Writer locks on each tree node.
   - Writers can write concurrently to the tree *on different nodes in the tree*
   - Writers cannot write concurrently to the *same node in the tree*
-  - Readers have concurrent access with other readers- but not writers.
-  - Nodes in the tree have 'k' children.
+  - Readers have concurrent access with other readers- but not writers *on the same node in the tree*
+  - Readers and writers can always access *different* tree nodes concurrently.
+  - Nodes in the tree have 'k' children determined by constructor arguments.
 
 ## Properties
 ### `long Count { get; }`
