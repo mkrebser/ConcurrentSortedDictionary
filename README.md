@@ -98,7 +98,7 @@ foreach (KeyValuePair<string, int> pair in myDict.Reversed()) {
 }
 ```
  - **Warning** 
-   - Thread Safety: Do not perform write operations inside iterator blocks. Iterator blocks maintain a shared read-lock on the tree node for the current item. Peforming a write operation inside an iterator block will likely cause a deadlock.
+   - Thread Safety: Do not perform read/write operations inside iterator blocks. Iterator blocks maintain a shared non-recursive read-lock on the tree node for the current item. You cannot access or mutate a different part of the tree inside the iterator scope.
 ### `IEnumerator<KeyValuePair<Key, Value>> GetEnumerator(int timeoutMs)`
 - throws a `System.TimeoutException` if the timeout is reached for any individual node in the tree.
 ### `Value this[Key key] { get; set; }`
