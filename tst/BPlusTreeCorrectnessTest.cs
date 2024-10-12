@@ -69,9 +69,41 @@ public class BPlusTreeCorrectnessTest {
             Test.AssertEqual(tree.GetOrAdd(key, val), val);
         }
 
+        public void two_item_test(int k, K key1, K key2) {
+            var tree = new ConcurrentSortedDictionary<K, V>(k);
+
+            Test.Assert(key1.CompareTo(key2) < 0);
+
+#pragma warning disable 8604
+            tree.AddOrUpdate(key1, default);
+            tree.AddOrUpdate(key2, default);
+#pragma warning restore 8604
+
+            Test.Assert(tree.StartingWith(key1).ToList().Count == 2);
+            Test.Assert(tree.StartingWith(key2).ToList().Count == 1);
+            Test.Assert(tree.StartingWith(key1, true).ToList().Count == 1);
+            Test.Assert(tree.StartingWith(key2, true).ToList().Count == 2);
+            Test.Assert(tree.EndingWith(key1, true).ToList().Count == 1);
+            Test.Assert(tree.EndingWith(key2, true).ToList().Count == 0);
+            Test.Assert(tree.EndingWith(key1).ToList().Count == 0);
+            Test.Assert(tree.EndingWith(key2).ToList().Count == 1);
+            Test.Assert(tree.Range(key1, key2).ToList().Count == 1);
+        }
+
         void checkIterators(List<ValueTuple<K, V>> pairs, ConcurrentSortedDictionary<K, V> tree) {
-            
+
             var orderedPairs = pairs.ToList(); orderedPairs.Sort((x, y) => x.Item1.CompareTo(y.Item1));
+
+            if (pairs.Count <= 2) {
+                
+                Test.Assert(tree.Keys.ToList().Count == orderedPairs.Count);
+                if (pairs.Count == 2) {
+                    Test.Assert(tree.StartingWith(orderedPairs[0].Item1).ToList().Count == orderedPairs.Count);
+                    Test.Assert(tree.EndingWith(orderedPairs[0].Item1, true).ToList().Count == 1);
+                    Test.Assert(tree.Range(orderedPairs[0].Item1, orderedPairs[1].Item1).ToList().Count == 1);
+                }
+                return;
+            }
 
             K middle = orderedPairs[orderedPairs.Count / 2].Item1;
             var firstHalf = tree.EndingWith(middle).ToList();
@@ -242,9 +274,11 @@ public class BPlusTreeCorrectnessTest {
             // int int tests
             var intint = new TypedTest<int, int>();
             intint.single_value_test(k, 1, 2, 0);
+            intint.two_item_test(k, 1, 2);
 
             var stringstring = new TypedTest<string, string>();
             stringstring.single_value_test(k, "012345", "string", "");
+            stringstring.two_item_test(k, "0", "1");
 
             var structclass = new TypedTest<CustomStruct, CustomClass>();
             structclass.single_value_test(k, new CustomStruct(1), new CustomClass(2), new CustomClass(0));

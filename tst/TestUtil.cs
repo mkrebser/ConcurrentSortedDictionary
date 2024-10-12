@@ -38,7 +38,7 @@ public static class Test {
         Assert(val < 0);
     }
     public static List<int> K_Range = new List<int>() { 3, 4, 5, 6, 8, 10, 13, 16, 20, 32, 64, 101, 128, 1024 };
-    public static List<int> Item_Count_Small = new List<int>() { 10, 100, 1000, 10000 };
+    public static List<int> Item_Count_Small = new List<int>() { 1, 2, 3, 10, 100, 1000, 10000 };
 
     public static List<int> K_Range_Small = new List<int> { 3, 8, 16, 32, 64, 128 };
     public static List<int> Item_Count_Large = new List<int>() { 10, 100, 1000, 10000, 1000000, 10000000 };
