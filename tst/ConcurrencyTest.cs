@@ -339,7 +339,6 @@ public class ConcurrencyTest {
         void checkIterators(List<KeyValuePair<K, V>> pairs, ConcurrentSortedDictionary<K, V> tree) {
             
             var orderedPairs = pairs.ToList(); orderedPairs.Sort((x, y) => x.Key.CompareTo(y.Key));
-            var reversedPairs = pairs.ToList(); pairs.Reverse();
 
             K middle = orderedPairs[orderedPairs.Count / 2].Key;
             var firstHalf = tree.EndingWith(middle).ToList();

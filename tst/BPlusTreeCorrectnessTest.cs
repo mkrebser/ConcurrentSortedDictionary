@@ -72,7 +72,6 @@ public class BPlusTreeCorrectnessTest {
         void checkIterators(List<ValueTuple<K, V>> pairs, ConcurrentSortedDictionary<K, V> tree) {
             
             var orderedPairs = pairs.ToList(); orderedPairs.Sort((x, y) => x.Item1.CompareTo(y.Item1));
-            var reversedPairs = pairs.ToList(); pairs.Reverse();
 
             K middle = orderedPairs[orderedPairs.Count / 2].Item1;
             var firstHalf = tree.EndingWith(middle).ToList();
@@ -91,6 +90,13 @@ public class BPlusTreeCorrectnessTest {
             for (int i = 0; i < orderedPairs.Count - 1; i++) {
                 Test.AssertEqual(firstHalf[i].Key, orderedPairs[i].Item1);
                 Test.AssertEqual(firstHalf[i].Value, orderedPairs[i].Item2);
+            }
+
+            if (pairs.Count > 3) {
+                var middleItems = tree.Range(orderedPairs[1].Item1, orderedPairs[pairs.Count - 1].Item1).ToList();
+                for (int i = 0; i < middleItems.Count; i++) {
+                    Test.AssertEqual(middleItems[i].Key, orderedPairs[i + 1].Item1);
+                }
             }
         }
 
