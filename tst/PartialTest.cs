@@ -1,7 +1,7 @@
 
 #if DEBUG
 
-//#define ConcurrentSortedDictionary_DEBUG
+#define ConcurrentSortedDictionary_DEBUG
 #nullable disable
 
 namespace System.Collections.Concurrent.Extended;
@@ -142,7 +142,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> where Key: IComparab
             Test.Assert(!tree._rootLock.IsUpgradeableReadLockHeld);
         }
 
-        private int assertLatchLock(ref Latch<K, V> latch,  int version = -1, bool beginRead = false) {
+        public int assertLatchLock(ref Latch<K, V> latch,  int version = -1, bool beginRead = false) {
             if (latch.isReadAccess || (latch.assumeLeafIsSafe && !this.isLeaf)) {
                 Test.Assert(!this._rwLock.IsWriteLockHeld);
                 Test.Assert(this._rwLock.IsReadLockHeld);

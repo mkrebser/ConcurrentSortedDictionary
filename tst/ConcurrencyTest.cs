@@ -214,6 +214,9 @@ public class ConcurrencyTest {
                     prevInit = true;
                 }
             }
+            // throw some min/max in there too
+            tree.GetMinOrDefault();
+            tree.GetMaxOrDefault();
         }
 
         public void rand_add_remove_iterator_test(int k, List<ValueTuple<K, V>> pairs, int ms = 900000, int nThreads = 32, bool alwaysAssertTreeState = false) {
@@ -448,6 +451,10 @@ public class ConcurrencyTest {
                                 Test.AssertEqual(l1[i].Key, l2[i].Key);
                                 Test.AssertEqual(l1[i].Value, l2[i].Value);
                             }
+
+                            Test.AssertEqual(tree.GetMinOrDefault().Key, l2[0].Key);
+                            Test.AssertEqual(tree.GetMaxOrDefault().Key, l2[l2.Count - 1].Key);
+
                             // check reversed
                             l1 = tree.Reversed().ToList();
                             l2 = l2.OrderBy(x => x.Key).Reverse().ToList();

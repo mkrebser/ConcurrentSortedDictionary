@@ -28,6 +28,10 @@ public class BPlusTreeCorrectnessTest {
             Test.Assert(tree.EndingWith(key).ToList().Count == 0);
             Test.Assert(tree.StartingWith(key, true).ToList()[0].Key.Equals(key));
             Test.Assert(tree.EndingWith(key, true).ToList().Count == 0);
+            Test.AssertEqual(tree.GetMaxOrDefault().Key, key);
+            Test.AssertEqual(tree.GetMinOrDefault().Key, key);
+            Test.AssertEqual(tree.GetMaxOrDefault().Value, val);
+            Test.AssertEqual(tree.GetMinOrDefault().Value, val);
             
             V outVal;
             Test.Assert(tree.TryGetValue(key, out outVal));
@@ -154,6 +158,10 @@ public class BPlusTreeCorrectnessTest {
                 Test.AssertEqual(tuple.listPair.Item1, tuple.treePair.Key);
                 Test.AssertEqual(tuple.listPair.Item2, tuple.treePair.Value);
             }
+
+            Test.AssertEqual(orderedPairs[0].Item1, tree.GetMinOrDefault().Key);
+            Test.AssertEqual(orderedPairs[orderedPairs.Count - 1].Item1, tree.GetMaxOrDefault().Key);
+
             orderedPairs.Reverse();
             foreach (var tuple in orderedPairs.Zip(reversedTree, (listPair, treePair) => (listPair, treePair))) {
                 Test.AssertEqual(tuple.listPair.Item1, tuple.treePair.Key);

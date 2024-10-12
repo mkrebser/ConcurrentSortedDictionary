@@ -23,7 +23,7 @@ SOFTWARE.
 */
 
 // Used for more nuanced lock testing and sanity test
-//#define ConcurrentSortedDictionary_DEBUG
+#define ConcurrentSortedDictionary_DEBUG
 
 
 // Put this in the concurrent namespace but with 'Extended'
@@ -630,6 +630,98 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
 
     IEnumerator IEnumerable.GetEnumerator() {
         return this.GetEnumerator();
+    }
+
+    private SearchResult minMaxSearch(out KeyValuePair<Key, Value> result, SearchType searchType, int timeoutMs = -1) {
+        result = default;
+        SearchResultInfo<Key, Value> searchInfo = default(SearchResultInfo<Key, Value>);
+        var searchOptions = new SearchOptions(timeoutMs, type: searchType);
+        var latch = new Latch<Key, Value>(LatchAccessType.read, this._rootLock, retainReaderLock: true);
+        var readLockBuffer = new LockBuffer2<Key, Value>();
+        try {
+            Value val;
+            var resultEx = ConcurrentKTreeNode<Key, Value>.TryGetValue(default, out val,
+                ref searchInfo, ref latch, ref readLockBuffer, this, searchOptions);
+            
+            if (resultEx == ConcurrentTreeResult_Extended.timedOut) {
+                return SearchResult.timedOut;
+            } else if (resultEx == ConcurrentTreeResult_Extended.notFound) {
+                return SearchResult.notFound;
+            } else {
+                #if ConcurrentSortedDictionary_DEBUG
+                int version = searchInfo.node.assertLatchLock(ref latch, beginRead: true);
+                #endif
+
+                // We need to maintain a read latch so we can retrieve the key safely
+                var nodeValue = searchType == SearchType.findMin
+                    ? searchInfo.node.GetValue(0)
+                    : searchInfo.node.GetValue(searchInfo.node.Count - 1);
+                result = new KeyValuePair<Key, Value>(nodeValue.key, nodeValue.value);
+
+                #if ConcurrentSortedDictionary_DEBUG
+                searchInfo.node.assertLatchLock(ref latch, version);
+                #endif
+
+                return SearchResult.success;
+            }
+        } finally {
+            // Release Latch before exiting
+            latch.ExitLatchChain(ref readLockBuffer);
+        }
+    }
+
+    public KeyValuePair<Key, Value> GetMinOrDefault(KeyValuePair<Key, Value> defaultValue = default, int timeoutMs = -1) {
+        KeyValuePair<Key, Value> result;
+        SearchResult searchResult = minMaxSearch(out result, SearchType.findMin, timeoutMs);
+        if (searchResult == SearchResult.success) {
+            return result;
+        }
+        return defaultValue;
+    }
+
+    public KeyValuePair<Key, Value> GetMaxOrDefault(KeyValuePair<Key, Value> defaultValue = default, int timeoutMs = -1) {
+        KeyValuePair<Key, Value> result;
+        SearchResult searchResult = minMaxSearch(out result, SearchType.findMax, timeoutMs);
+        if (searchResult == SearchResult.success) {
+            return result;
+        }
+        return defaultValue;
+    }
+
+    /// <summary>
+    /// Get the min value in the collection.
+    /// </summary>
+    public SearchResult TryPeekMin(out KeyValuePair<Key, Value> min, int timeoutMs = -1) {
+        return minMaxSearch(out min, SearchType.findMin, timeoutMs);
+    }
+
+    /// <summary>
+    /// Get the max value in the collection.
+    /// </summary>
+    public SearchResult TryPeekMax(out KeyValuePair<Key, Value> min, int timeoutMs = -1) {
+        return minMaxSearch(out min, SearchType.findMax, timeoutMs);
+    }
+
+    /// <summary>
+    /// Get the min value in the collection. Returns false if the collection is empty. Throws exception if timed out.
+    /// </summary>
+    public bool PeekMin(out KeyValuePair<Key, Value> min, int timeoutMs = -1) {
+        SearchResult result = minMaxSearch(out min, SearchType.findMin, timeoutMs);
+        if (result == SearchResult.timedOut) {
+            throw new TimeoutException();
+        }
+        return result == SearchResult.success;
+    }
+
+    /// <summary>
+    /// Get the max value in the collection.  Returns false if the collection is empty. Throws exception if timed out.
+    /// </summary>
+    public bool PeekMax(out KeyValuePair<Key, Value> min, int timeoutMs = -1) {
+        SearchResult result = minMaxSearch(out min, SearchType.findMax, timeoutMs);
+        if (result == SearchResult.timedOut) {
+            throw new TimeoutException();
+        }
+        return result == SearchResult.success;
     }
 
     public void Clear() {

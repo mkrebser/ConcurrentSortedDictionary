@@ -89,6 +89,16 @@ if (myDict.ContainsKey("key1")) {
 - `SearchResult.success` if the input key is found.
 - `SearchResult.notFound` if the input key is not found.
 - `SearchResult.timedOut`  if the operation timed out when acquiring locks.
+### `SearchResult TryPeekMin(out KeyValuePair<Key, Value> result, int timeoutMs = -1)`
+### `SearchResult TryPeekMax(out KeyValuePair<Key, Value> result, int timeoutMs = -1)`
+- `SearchResult.success` if there is a minimum value in the collection.
+- `SearchResult.notFound` if the collection is empty.
+- `SearchResult.timedOut`  if the operation timed out when acquiring locks.
+### `bool PeekMin(out KeyValuePair<Key, Value> result, int timeoutMs = -1)`
+### `bool PeekMax(out KeyValuePair<Key, Value> result, int timeoutMs = -1)`
+- `true` if there is a minimum value in the collection.
+- `false` if the collection is empty.
+- `throws TimeoutException`  if the operation timed out when acquiring locks.
 ### `IEnumerator<KeyValuePair<Key, Value>> GetEnumerator()`
 ```
 foreach (KeyValuePair<string, int> pair in myDict) {
