@@ -23,7 +23,7 @@ SOFTWARE.
 */
 
 // Used for more nuanced lock testing and sanity test
-// #define ConcurrentSortedDictionary_DEBUG
+//#define ConcurrentSortedDictionary_DEBUG
 
 
 // Put this in the concurrent namespace but with 'Extended'
@@ -545,8 +545,56 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         };
     }
 
+    /// <summary>
+    /// Returns all items in the tree. Reversed ordering.
+    /// </summary>
+    /// <param name="itemTimeoutMs"> optional timeout. </param>
+    /// <returns></returns>
     public IEnumerable<KeyValuePair<Key, Value>> Reversed(int itemTimeoutMs = -1) {
         using (var it = GetEnumerator(itemTimeoutMs, reversed: true)) {
+            while (it.MoveNext()) {
+                yield return it.Current;
+            }
+        };
+    }
+
+    /// <summary>
+    /// Returns all items in the tree within the desired range. If start > stop then the iterator uses reverse iteration direction.
+    /// </summary>
+    /// <param name="startInclusive"> inclusive start iteration. </param>
+    /// <param name="endExclusive"> exclusive end iteration. </param>
+    /// <param name="itemTimeoutMs"> optional timeout. </param>
+    /// <returns></returns>
+    /// <exception cref="ArgumentException"></exception>
+    public IEnumerable<KeyValuePair<Key, Value>> Range(Key startInclusive, Key endExclusive, int itemTimeoutMs = -1) {
+        int cmp = startInclusive.CompareTo(endExclusive);
+        if (cmp == 0) {
+            throw new ArgumentException("Iteration range start cannot equal end!");
+        }
+        bool reverse = cmp >= 0;
+        using (var it = GetEnumerator(startInclusive, true, endExclusive, true, itemTimeoutMs, reverse)) {
+            while (it.MoveNext()) {
+                yield return it.Current;
+            }
+        };
+    }
+
+    /// <summary>
+    /// Returns all items in the tree starting with the desired inclusive key.
+    /// </summary>
+    public IEnumerable<KeyValuePair<Key, Value>> StartingWith(Key startInclusive, bool reverse = false, int itemTimeoutMs = -1) {
+        using (var it = GetEnumerator(startInclusive, true, default, false, itemTimeoutMs, reverse)) {
+            while (it.MoveNext()) {
+                yield return it.Current;
+            }
+        };
+    }
+
+    /// <summary>
+    /// Returns all items in the tree ending with the desired exclusive key.
+    /// </summary>
+    public IEnumerable<KeyValuePair<Key, Value>> EndingWith(Key endExclusive, bool reverse = false, int itemTimeoutMs = -1) {
+        using (var it = GetEnumerator(default, false, endExclusive, true, itemTimeoutMs, reverse)) {
             while (it.MoveNext()) {
                 yield return it.Current;
             }
@@ -560,8 +608,24 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         return GetEnumerator(-1, false);
     }
 
-    public IEnumerator<KeyValuePair<Key, Value>> GetEnumerator(int itemTimeoutMs = -1, bool reversed = false) {
+    public IEnumerator<KeyValuePair<Key, Value>> GetEnumerator(
+        int itemTimeoutMs = -1, 
+        bool reversed = false
+    ) {
         return ConcurrentKTreeNode<Key, Value>.AllItems(this, itemTimeoutMs, reversed).GetEnumerator();
+    }
+
+    public IEnumerator<KeyValuePair<Key, Value>> GetEnumerator(
+        Key startInclusive = default,
+        bool useStartInclusive = false,
+        Key endExclusive = default,
+        bool useEndExclusive = false,
+        int itemTimeoutMs = -1, 
+        bool reversed = false
+    ) {
+        return ConcurrentKTreeNode<Key, Value>.AllItems(
+            this, itemTimeoutMs, reversed, startInclusive, endExclusive, useStartInclusive, useEndExclusive
+        ).GetEnumerator();
     }
 
     IEnumerator IEnumerable.GetEnumerator() {
@@ -1624,7 +1688,7 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                         (options.type == SearchType.findMin ? 0 : info.node.Count - 1);
                     info.depth = depth;
                     var searchResult = ConcurrentTreeResult_Extended.success;
-                    if (compareResult == 0) {
+                    if (compareResult == 0 && info.node.Count != 0) {
                         value = info.node._values[info.index].value;
                     } else {
                         value = default(V);
@@ -1703,7 +1767,11 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
         public static IEnumerable<KeyValuePair<K, V>> AllItems(
             ConcurrentSortedDictionary<Key, Value> tree,
             int itemTimeoutMs = -1,
-            bool reversed = false
+            bool reversed = false,
+            K startInclusive = default(K),
+            K stopExclusive = default(K),
+            bool useStartInclusive = false,
+            bool useStopExclusive = false
         ) {
             bool acquiredNextNode(ConcurrentKTreeNode<K, V> node, out ConcurrentKTreeNode<K, V> next) {
                 // Now get the next node
@@ -1717,22 +1785,46 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                 }
                 return false; // acquired, don't need to retry search
             }
+            bool shouldExitEarly(in KeyValuePair<K, V> inputPair, in bool reversed, in K stopExclusive, in bool useStopExclusive) {
+                // First, check that iteration does not end early if an endExclusive is used
+                return useStopExclusive && (
+                    reversed ? inputPair.Key.CompareTo(stopExclusive) <= 0 : inputPair.Key.CompareTo(stopExclusive) >= 0
+                );
+            }
+            bool shouldYieldEntry(in KeyValuePair<K, V> pair, in bool reversed, in K cmpKey, in bool useStartInclusive, in bool startedSearch) {
+                // if start inclusive is used... then we have to do an inclusive comparison for the very first item returned
+                if (!startedSearch && useStartInclusive) {
+                    return reversed ? pair.Key.CompareTo(cmpKey) <= 0 : pair.Key.CompareTo(cmpKey) >= 0;
+                // Otherwise the first item is always returned OR the comparison is used to determine to yield the item
+                } else {
+                    return !startedSearch || (reversed ? pair.Key.CompareTo(cmpKey) < 0 : pair.Key.CompareTo(cmpKey) > 0);
+                }
+            }
 
+            // Tracks the current node this iterator is processing
             ConcurrentKTreeNode<K, V> node = null;
+            // If true, the iterator needs to restart the search from the key
+            // otherwise the iterator can get the next node from sibling references
             bool retry = true;
+            // unused
             V _ = default(V);
-            K cmpKey = default(K);
+            // Used to mark where we are in the search
+            K cmpKey = useStartInclusive ? startInclusive : default(K);
+            // If true, then we have returned at least one item from this iterator
             bool startedSearch = false;
+            // tree search meta data object
             SearchResultInfo<K, V> subtree = default(SearchResultInfo<K, V>);
 
             do {
                 if (retry) {
-                    var searchType = startedSearch ? SearchType.search : (reversed ? SearchType.findMax : SearchType.findMin);
+                    // Fill out search arguments. If this is the initial search... then we will start with the min/max
+                    // otherwise we will start our search at the cmpKey marker
+                    var searchType = startedSearch || useStartInclusive ? SearchType.search : (reversed ? SearchType.findMax : SearchType.findMin);
                     var searchOptions = new SearchOptions(itemTimeoutMs, type: searchType);
                     var latch = new Latch<K, V>(LatchAccessType.read, tree._rootLock, retainReaderLock: true);
                     var readLockBuffer = new LockBuffer2<K, V>();
 
-                    // Recurse to leaf
+                    // Recurse to leaf- get the node at the cmpKey (or min/max on initial search)
                     var searchResult = TryGetValue(cmpKey, out _, ref subtree,
                         ref latch, ref readLockBuffer, in tree, searchOptions);
                     if (searchResult == ConcurrentTreeResult_Extended.timedOut) {
@@ -1740,7 +1832,6 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     } else if (searchResult == ConcurrentTreeResult_Extended.notSafeToUpdateLeaf) {
                         throw new Exception("Bad Tree State, unexpected search result");
                     }
-                    startedSearch = true;
                     node = subtree.node;
 
                     #if ConcurrentSortedDictionary_DEBUG
@@ -1748,19 +1839,32 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
                     #endif
 
                     try {
+                        // Set the iterators based on the iterator direction
                         int start, end, increment;
                         if (reversed) { start = node.Count - 1; end = -1; increment = -1; }
                         else { start = 0; end = node.Count; increment = 1; }
 
+                        // iterator the the K items in the node- and return them if they come after the cmpKey
                         for (int i = start; (!reversed && i < end) || (reversed && i > end); i += increment) {
                             var pair = new KeyValuePair<K, V>(node._values[i].key, node._values[i].value);
-                            bool notProceding = reversed ? pair.Key.CompareTo(cmpKey) < 0 : pair.Key.CompareTo(cmpKey) > 0;
-                            if (!startedSearch || notProceding) {
+                            // First, check that iteration does not end early if an endExclusive is used
+                            bool shouldEndEarly = shouldEndEarly = shouldExitEarly(
+                                in pair, in reversed, in stopExclusive, in useStopExclusive
+                            );
+                            if (shouldEndEarly) {
+                                yield break;
+                            }
+                            // Now, we decide if the item should be returned based on the cmpKey
+                            bool shouldYieldItem = shouldYieldEntry(
+                                in pair, in reversed, in cmpKey, in useStartInclusive, in startedSearch
+                            );
+                            if (shouldYieldItem) {
                                 yield return pair;
                                 startedSearch = true;
                                 cmpKey = pair.Key;
                             }
                         }
+                        // attempt to get the next node to iterate on
                         retry = acquiredNextNode(node, out node);
                     } finally {
 
@@ -1785,8 +1889,18 @@ public partial class ConcurrentSortedDictionary<Key, Value> : IEnumerable<KeyVal
 
                         for (int i = start; (!reversed && i < end) || (reversed && i > end); i += increment) {
                             var pair = new KeyValuePair<K, V>(node._values[i].key, node._values[i].value);
-                            bool notProceding = reversed ? pair.Key.CompareTo(cmpKey) < 0 : pair.Key.CompareTo(cmpKey) > 0;
-                            if (!startedSearch || notProceding) {
+                            // First, check that iteration does not end early if an endExclusive is used
+                            bool shouldEndEarly = shouldEndEarly = shouldExitEarly(
+                                in pair, in reversed, in stopExclusive, in useStopExclusive
+                            );
+                            if (shouldEndEarly) {
+                                yield break;
+                            }
+                            // Now, we decide if the item should be returned based on the cmpKey
+                            bool shouldYieldItem = shouldYieldEntry(
+                                in pair, in reversed, in cmpKey, in useStartInclusive, in startedSearch
+                            );
+                            if (shouldYieldItem) {
                                 yield return pair;
                                 startedSearch = true;
                                 cmpKey = pair.Key;

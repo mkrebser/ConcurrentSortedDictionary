@@ -9,6 +9,11 @@ public class BPlusTreeCorrectnessTest {
         public void single_value_test(int k, K key, V val, V unusedV) {
             var tree = new ConcurrentSortedDictionary<K, V>(k);
 
+            Test.Assert(tree.StartingWith(key).ToList().Count == 0);
+            Test.Assert(tree.EndingWith(key).ToList().Count == 0);
+            Test.Assert(tree.StartingWith(key, true).ToList().Count == 0);
+            Test.Assert(tree.EndingWith(key, true).ToList().Count == 0);
+
             // Add something
             tree.AddOrUpdate(key, val);
 
@@ -19,6 +24,10 @@ public class BPlusTreeCorrectnessTest {
             Test.Assert(tree.Count() == 1);
             Test.Assert(tree.ContainsKey(key));
             Test.Assert(tree.Depth == 1);
+            Test.Assert(tree.StartingWith(key).ToList()[0].Key.Equals(key));
+            Test.Assert(tree.EndingWith(key).ToList().Count == 0);
+            Test.Assert(tree.StartingWith(key, true).ToList()[0].Key.Equals(key));
+            Test.Assert(tree.EndingWith(key, true).ToList().Count == 0);
             
             V outVal;
             Test.Assert(tree.TryGetValue(key, out outVal));
@@ -60,6 +69,31 @@ public class BPlusTreeCorrectnessTest {
             Test.AssertEqual(tree.GetOrAdd(key, val), val);
         }
 
+        void checkIterators(List<ValueTuple<K, V>> pairs, ConcurrentSortedDictionary<K, V> tree) {
+            
+            var orderedPairs = pairs.ToList(); orderedPairs.Sort((x, y) => x.Item1.CompareTo(y.Item1));
+            var reversedPairs = pairs.ToList(); pairs.Reverse();
+
+            K middle = orderedPairs[orderedPairs.Count / 2].Item1;
+            var firstHalf = tree.EndingWith(middle).ToList();
+            var secondHalf = tree.StartingWith(middle).ToList();
+
+            firstHalf.AddRange(secondHalf);
+            for (int i = 0; i < orderedPairs.Count; i++) {
+                Test.AssertEqual(firstHalf[i].Key, orderedPairs[i].Item1);
+                Test.AssertEqual(firstHalf[i].Value, orderedPairs[i].Item2);
+            }
+
+            firstHalf = tree.Range(orderedPairs[0].Item1, middle).ToList();
+            var secondHalfMinusOne = tree.Range(middle, orderedPairs[orderedPairs.Count - 1].Item1);
+
+            firstHalf.AddRange(secondHalfMinusOne);
+            for (int i = 0; i < orderedPairs.Count - 1; i++) {
+                Test.AssertEqual(firstHalf[i].Key, orderedPairs[i].Item1);
+                Test.AssertEqual(firstHalf[i].Value, orderedPairs[i].Item2);
+            }
+        }
+
         void addAllToTree(List<ValueTuple<K, V>> pairs, ConcurrentSortedDictionary<K, V> tree, bool alwaysAssertTreeState) {
             int count = 0;
             foreach (var pair in pairs) {
@@ -87,6 +121,8 @@ public class BPlusTreeCorrectnessTest {
                 Test.AssertEqual(tuple.listPair.Item1, tuple.treePair.Key);
                 Test.AssertEqual(tuple.listPair.Item2, tuple.treePair.Value);
             }
+
+            checkIterators(pairs, tree);
         }
         void removeAllFromTree(List<ValueTuple<K, V>> pairs, ConcurrentSortedDictionary<K, V> tree, bool alwaysAssertTreeState) {
             // clear tree one-by-one ...

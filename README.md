@@ -97,9 +97,23 @@ foreach (KeyValuePair<string, int> pair in myDict) {
 foreach (KeyValuePair<string, int> pair in myDict.Reversed()) {
   // Do something but iterating in reverse direction
 }
+foreach (KeyValuePair<string, int> pair in myDict.Range(5, 10)) {
+  // iterate through all nodes within the range (inclusive, exclusive)
+}
+foreach (KeyValuePair<string, int> pair in myDict.Range(99, 10)) {
+  // iterate through all nodes within the range (reverse direction)
+}
+foreach (KeyValuePair<string, int> pair in myDict.StartingWith(55, reverse: true)) {
+  // iterate through all nodes starting with a key in the reverse direction
+}
+foreach (KeyValuePair<string, int> pair in myDict.EndingWith(40)) {
+  // iterate through all nodes ending with an exclusive key
+}
 ```
  - **Warning** 
-   - Thread Safety: Do not perform read/write operations inside iterator blocks. Iterator blocks maintain a shared non-recursive read-lock on the tree node for the current item. You cannot access or mutate a different part of the tree inside the iterator scope.
+   - Thread Safety: Do not perform read/write operations inside iterator blocks. Iterator blocks maintain a shared non-recursive read-lock on the tree node for the current item. You cannot access or mutate a different part of the tree inside the iterator scope. Additionally, always make sure to dispose of the iterator
+   because it maintains a read-lock while iterating. Failing to dispose of the enumerator may cause deadlocks!
+   - It is generally not recommended to use the enumerators in nested LINQ statements. While this can be done safely, it is easy to deadlock because- again, readlocks are held until the iterator finishes. Lazy execution of LINQ functions can make it difficult to understand when locks are being held.
 ### `IEnumerator<KeyValuePair<Key, Value>> GetEnumerator(int timeoutMs)`
 - throws a `System.TimeoutException` if the timeout is reached for any individual node in the tree.
 ### `Value this[Key key] { get; set; }`

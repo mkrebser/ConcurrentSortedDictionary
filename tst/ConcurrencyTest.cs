@@ -336,6 +336,31 @@ public class ConcurrencyTest {
             }
         }
 
+        void checkIterators(List<KeyValuePair<K, V>> pairs, ConcurrentSortedDictionary<K, V> tree) {
+            
+            var orderedPairs = pairs.ToList(); orderedPairs.Sort((x, y) => x.Key.CompareTo(y.Key));
+            var reversedPairs = pairs.ToList(); pairs.Reverse();
+
+            K middle = orderedPairs[orderedPairs.Count / 2].Key;
+            var firstHalf = tree.EndingWith(middle).ToList();
+            var secondHalf = tree.StartingWith(middle).ToList();
+
+            firstHalf.AddRange(secondHalf);
+            for (int i = 0; i < orderedPairs.Count; i++) {
+                Test.AssertEqual(firstHalf[i].Key, orderedPairs[i].Key);
+                Test.AssertEqual(firstHalf[i].Value, orderedPairs[i].Value);
+            }
+
+            firstHalf = tree.Range(orderedPairs[0].Key, middle).ToList();
+            var secondHalfMinusOne = tree.Range(middle, orderedPairs[orderedPairs.Count - 1].Key).ToList();
+
+            firstHalf.AddRange(secondHalfMinusOne);
+            for (int i = 0; i < orderedPairs.Count - 1; i++) {
+                Test.AssertEqual(firstHalf[i].Key, orderedPairs[i].Key);
+                Test.AssertEqual(firstHalf[i].Value, orderedPairs[i].Value);
+            }
+        }
+
         public void rand_add_remove_parity_test(int k, List<ValueTuple<K, V>> pairs, int ms = 60000, int nThreads = 32, bool alwaysAssertTreeState = false) {
             var tree = new ConcurrentSortedDictionary<K, V>(k);
             var dict = new ConcurrentDictionary<K, V>();
@@ -426,11 +451,13 @@ public class ConcurrencyTest {
                             }
                             // check reversed
                             l1 = tree.Reversed().ToList();
-                            l2 = l2.OrderBy(x => x.Key).ToList();
+                            l2 = l2.OrderBy(x => x.Key).Reverse().ToList();
                             for (int i = 0; i < l1.Count; i++) {
                                 Test.AssertEqual(l1[i].Key, l2[i].Key);
                                 Test.AssertEqual(l1[i].Value, l2[i].Value);
                             }
+
+                            checkIterators(l2, tree);
 
                             barrier.SignalAndWait();
                         }
