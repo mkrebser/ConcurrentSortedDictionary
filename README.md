@@ -3,7 +3,7 @@
 ### [Learn about Concurrent B+ Trees here! [LINK]](https://medium.com/@mkrebser/concurrent-b-trees-concurrentsorteddictionary-c-net-f7c1c2a84141)
 
 
-ConcurrentSortedDictionary<Key, Value> implementation in (c#, .NET 7).
+ConcurrentSortedDictionary<Key, Value> implementation in (c#, .NET).
 
 - The interface is based on [.NET ConcurrentDictionary:](https://learn.microsoft.com/en-us/dotnet/api/system.collections.concurrent.concurrentdictionary-2?view=net-7.0)
 - The ConcurrentSortedDictionary class is entirely implemented in a single file: [ConcurrentSortedDictionary.cs.](https://github.com/mkrebser/ConcurrentSortedDictionary/blob/master/ConcurrentSortedDictionary.cs)
